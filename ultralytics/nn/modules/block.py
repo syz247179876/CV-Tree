@@ -1,15 +1,16 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 """Block modules."""
+import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import typing as t
 
-from .conv import Conv, DWConv, GhostConv, LightConv, RepConv
+from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, ConvOD, PartialConv
 from .transformer import TransformerBlock
-
-__all__ = ('DFL', 'HGBlock', 'HGStem', 'SPP', 'SPPF', 'C1', 'C2', 'C3', 'C2f', 'C3x', 'C3TR', 'C3Ghost',
-           'GhostBottleneck', 'Bottleneck', 'BottleneckCSP', 'Proto', 'RepC3')
+__all__ = ('DFL', 'HGBlock', 'HGStem', 'SPP', 'SPPF', 'C1', 'C2', 'C3', 'C2f', 'C2fOD', 'C3x', 'C3TR', 'C3Ghost',
+           'GhostBottleneck', 'Bottleneck', 'BottleneckCSP', 'BottleneckOD', 'Proto', 'RepC3', 'CABlock', 'C2fFaster')
 
 
 class DFL(nn.Module):
@@ -185,13 +186,19 @@ class C2(nn.Module):
 
 
 class C2f(nn.Module):
-    """Faster Implementation of CSP Bottleneck with 2 convolutions."""
+    """
+    Faster Implementation of CSP Bottleneck with 2 convolutions.
+
+    集合CSPNet + VoVNet思想, 在ELAN基础上进一步改进，将ELAN中Conv块替换成Bottleneck
+    """
+
 
     def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
         """Initialize CSP bottleneck layer with two convolutions with arguments ch_in, ch_out, number, shortcut, groups,
         expansion.
         """
         super().__init__()
+        # 分割梯度流
         self.c = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
@@ -199,7 +206,9 @@ class C2f(nn.Module):
 
     def forward(self, x):
         """Forward pass through C2f layer."""
+        # 沿着通道维度进行拆分
         y = list(self.cv1(x).chunk(2, 1))
+        # 右半部分经过一系列的Bottleneck, 将Yolo中的Conv块替换为Bottleneck残差结构
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
 
@@ -208,6 +217,49 @@ class C2f(nn.Module):
         y = list(self.cv1(x).split((self.c, self.c), 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
+
+
+class C2fOD(C2f):
+    """
+    Replace ordinary conv with ODConv on Bottleneck of C2f module
+    """
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            n: int = 1,
+            shortcut: bool = False,
+            expert_num: int = 4,
+            reduction: float = 0.0625,
+            hidden_chans: int = 16,
+            g: int = 1,
+            e: float = 0.5
+    ):
+        super(C2fOD, self).__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(BottleneckOD(self.c, self.c, shortcut, g, k=(3, 3), e=1.0,
+                                            expert_num=expert_num, reduction=reduction, hidden_chans=hidden_chans
+                                            ) for _ in range(n))
+
+
+class C2fFaster(C2f):
+    """
+    Replace ordinary conv with PConv on Bottleneck of C2f module
+    """
+
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            n: int = 1,
+            shortcut: bool = False,
+            n_div: int = 4,
+            pconv_fw_type: str = 'split_cat',
+            g: int = 1,
+            e: float = 0.5
+    ):
+        super(C2fFaster, self).__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(BottleneckFaster(self.c, self.c, shortcut, n_div, pconv_fw_type,
+                                                g, e=1.0) for _ in range(n))
 
 
 class C3(nn.Module):
@@ -331,3 +383,152 @@ class BottleneckCSP(nn.Module):
         y1 = self.cv3(self.m(self.cv1(x)))
         y2 = self.cv2(x)
         return self.cv4(self.act(self.bn(torch.cat((y1, y2), 1))))
+
+
+class BottleneckOD(nn.Module):
+    """
+    Bottleneck with ODConv
+    """
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            shortcut: bool = True,
+            g: int = 1,
+            k: t.Tuple = (3, 3),
+            e: float = 0.5,
+            reduction: float = 0.0625,
+            expert_num: int = 4,
+            hidden_chans: int = 16,
+    ):
+        super(BottleneckOD, self).__init__()
+        c_ = int(c1 * e)
+        self.cv1 = ConvOD(c1, c_, k[0], 1, g=g, reduction=reduction, expert_num=expert_num, hidden_chans=hidden_chans)
+        self.cv2 = ConvOD(c_, c2, k[1], 1, g=g, reduction=reduction, expert_num=expert_num, hidden_chans=hidden_chans)
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x: torch.Tensor):
+        return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
+
+class BottleneckFaster(nn.Module):
+    """
+    Bottleneck with PConv
+    """
+
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            shortcut: bool = True,
+            n_div: int = 4,
+            pconv_fw_type: str = 'split_cat',
+            g: int = 1,
+            e: float = 0.5,
+    ):
+        super(BottleneckFaster, self).__init__()
+        c_ = int(c1 * e)
+        self.cv1 = PartialConv(c1, n_div, forward=pconv_fw_type)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv3 = Conv(c_, c2, 1, 1, g=g)
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.cv3(self.cv2(self.cv1(x))) if self.add else self.cv3(self.cv2(self.cv1(x)))
+
+
+
+class SpatialACT(nn.Module):
+    """
+    which is smoother than Relu
+    """
+
+    def __init__(self, inplace=True):
+        super(SpatialACT, self).__init__()
+        self.act = nn.ReLU6(inplace=inplace)
+
+    def forward(self, x: torch.Tensor):
+        return x * self.act(x + 3) / 6
+
+
+class CABlock(nn.Module):
+    """
+    Coordinate Attention Block, which embeds positional information into channel attention.
+    1.It considers spatial dimension attention and channel dimension attention, it helps model locate, identify and
+    enhance more interesting objects.
+
+    2.CA utilizes two 2-D GAP operation to respectively aggregate the input features along the vertical and horizontal
+    directions into two separate direction aware feature maps. Then, encode these two feature maps separately into
+    an attention tensor.
+
+    3. Among these two feature maps(Cx1xW and CxHx1), one uses GAP to model the long-distance dependencies of
+    the feature maps on a spatial dimension, while retaining position information int the other spatial dimension.
+    In that case, the two feature maps, spatial information, and long-range dependencies complement each other.
+
+    """
+
+    def __init__(
+            self,
+            in_chans: int,
+            out_chans: int,
+            reduction: int = 32,
+            norm_layer: t.Optional[nn.Module] = None,
+            act_layer: t.Optional[nn.Module] = None,
+    ):
+        super(CABlock, self).__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        if act_layer is None:
+            act_layer = nn.ReLU6
+        self.in_chans = in_chans
+        self.out_chans = out_chans
+        # (C, H, 1)
+        self.gap_h = nn.AdaptiveAvgPool2d((None, 1))
+        # (C, 1, W)
+        self.gap_w = nn.AdaptiveAvgPool2d((1, None))
+
+        hidden_chans = max(8, in_chans // reduction)
+        self.conv1 = nn.Conv2d(in_chans, hidden_chans, 1)
+        self.bn1 = norm_layer(hidden_chans)
+        self.act = SpatialACT(inplace=True)
+
+        self.attn_h = nn.Conv2d(hidden_chans, out_chans, 1)
+        self.attn_w = nn.Conv2d(hidden_chans, out_chans, 1)
+        self.sigmoid = nn.Sigmoid()
+
+        # self._init_weight()
+
+    def _init_weight(self):
+        for m in self.modules():
+            if isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Conv2d):
+                # Obey uniform distribution during attention initialization
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+                if m.bias is not None:
+                    m.bias.data.zero_()
+
+
+    def forward(self, x: torch.Tensor):
+        identity = x
+        b, c, h, w = x.size()
+        x_h = self.gap_h(x)
+        x_w = self.gap_w(x).permute(0, 1, 3, 2)
+        y = torch.cat((x_h, x_w), dim=2)
+        y = self.conv1(y)
+        y = self.bn1(y)
+        y = self.act(y)
+
+        # split
+        x_h, x_w = torch.split(y, [h, w], dim=2)
+        x_w = x_w.permute(0, 1, 3, 2)
+
+        # compute attention
+        a_h = self.sigmoid(self.attn_h(x_h))
+        a_w = self.sigmoid(self.attn_w(x_w))
+
+        return identity * a_w * a_h

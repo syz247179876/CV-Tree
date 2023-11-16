@@ -429,7 +429,8 @@ class BottleneckFaster(nn.Module):
         c_ = int(c1 * e)
         self.cv1 = PartialConv(c1, n_div, forward=pconv_fw_type)
         self.cv2 = Conv(c1, c_, 1, 1)
-        self.cv3 = Conv(c_, c2, 1, 1, g=g)
+        # self.cv3 = Conv(c_, c2, 1, 1, g=g)
+        self.cv3 = nn.Conv2d(c_, c2, 1, 1, groups=g)
         self.add = shortcut and c1 == c2
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

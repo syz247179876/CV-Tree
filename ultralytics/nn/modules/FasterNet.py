@@ -7,20 +7,20 @@ from .conv import PartialConv
 from timm.models.layers import DropPath
 
 
-__all__ = ['FasterNet', ]
+__all__ = ['FasterNet', 'FasterNetBlock', 'PatchEmbedding', 'PatchMerging', 'BasicStage']
 
 class FasterNetBlock(nn.Module):
 
     def __init__(
             self,
-            dim,
-            n_div,
-            mlp_ratio,
-            drop_path,
-            layer_scale_init_value,
-            act_layer,
-            norm_layer,
-            pconv_fw_type,
+            dim: int,
+            drop_path: float,
+            act_layer: t.Callable,
+            n_div: int = 4,
+            mlp_ratio: float = 2.,
+            layer_scale_init_value: int = 0,
+            pconv_fw_type: str = 'split_cat',
+            norm_layer: t.Optional[t.Callable] = nn.BatchNorm2d,
     ):
         super(FasterNetBlock, self).__init__()
         self.dim = dim
@@ -64,15 +64,16 @@ class BasicStage(nn.Module):
     """
 
     def __init__(self,
-                 dim,
-                 depth,
-                 n_div,
-                 mlp_ratio,
-                 drop_path,
-                 layer_scale_init_value,
-                 norm_layer,
-                 act_layer,
-                 pconv_fw_type
+                 dim: int,
+                 depth: int,
+                 drop_path: t.List,
+                 act_layer: t.Optional[t.Callable],
+                 last_norm: bool = False,
+                 n_div: int = 4,
+                 mlp_ratio: float = 2.,
+                 layer_scale_init_value: int = 0,
+                 pconv_fw_type: str = 'split_cat',
+                 norm_layer: t.Optional[t.Callable] = nn.BatchNorm2d,
                  ):
         super().__init__()
 
@@ -89,8 +90,10 @@ class BasicStage(nn.Module):
             )
             for i in range(depth)
         ]
-
+        if last_norm:
+            blocks_list.append(norm_layer(dim))
         self.blocks = nn.Sequential(*blocks_list)
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.blocks(x)
@@ -104,11 +107,11 @@ class PatchEmbedding(nn.Module):
 
     def __init__(
             self,
-            patch_size: int,
-            patch_stride: int,
             in_chans: int,
             embed_dim: int,
-            norm_layer: t.Optional[t.Callable] = None
+            patch_size: int = 4,
+            patch_stride: int = 4,
+            norm_layer: t.Optional[t.Callable] = nn.BatchNorm2d
     ):
         super(PatchEmbedding, self).__init__()
         self.norm = norm_layer(embed_dim) if norm_layer is not None else nn.Identity()
@@ -127,10 +130,10 @@ class PatchMerging(nn.Module):
 
     def __init__(
             self,
-            patch_size2: int,
-            patch_stride2: int,
             dim: int,
-            norm_layer: t.Optional[t.Callable] = None
+            patch_size2: int = 2,
+            patch_stride2: int = 2,
+            norm_layer: t.Optional[t.Callable] = nn.BatchNorm2d
     ):
         super(PatchMerging, self).__init__()
         self.norm = norm_layer(2 * dim) if norm_layer is not None else nn.Identity()
@@ -149,9 +152,10 @@ class FasterNet(nn.Module):
     def __init__(
             self,
             in_chans: int = 3,
-            num_classes: int = 1000,
             embed_dim: int = 96,
             depths: t.Tuple = (1, 2, 8, 2),
+            drop_path_rate: float = 0.1,
+            act_layer: str = 'RELU',
             mlp_ratio: float = 2.,
             n_div: int = 4,
             patch_size: int = 4,
@@ -159,11 +163,8 @@ class FasterNet(nn.Module):
             patch_size2: int = 2,
             patch_stride2: int = 2,
             patch_norm: bool = True,
-            feature_dim: int = 1280,
-            drop_path_rate: float = 0.1,
             layer_scale_init_value: int = 0,
             norm_layer: str = 'BN',
-            act_layer: str = 'RELU',
             init_cfg=None,
             pretrained=None,
             pconv_fw_type='split_cat',
@@ -192,10 +193,10 @@ class FasterNet(nn.Module):
 
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbedding(
-            patch_size=patch_size,
-            patch_stride=patch_stride,
             in_chans=in_chans,
             embed_dim=embed_dim,
+            patch_size=patch_size,
+            patch_stride=patch_stride,
             norm_layer=norm_layer
         )
 
@@ -246,7 +247,7 @@ class FasterNet(nn.Module):
         outs = []
         for idx, stage in enumerate(self.stages):
             x = stage(x)
-            # add norm to each FasterNet Block
+            # add norm to each stage
             if idx in self.out_indices:
                 norm_layer = getattr(self, f'norm{idx}')
                 x_out = norm_layer(x)

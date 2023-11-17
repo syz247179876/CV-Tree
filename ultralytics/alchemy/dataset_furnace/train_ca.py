@@ -1,3 +1,6 @@
+"""
+YoloV8 baseline + Coordinate Attention(neck)
+"""
 from ultralytics.models import YOLO
 
 if __name__ == '__main__':

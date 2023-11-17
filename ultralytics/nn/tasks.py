@@ -6,11 +6,13 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import typing as t
 
 from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottleneck, BottleneckCSP, C2f, C3Ghost, C3x,
                                     Classify, Concat, Conv, Conv2, ConvTranspose, Detect, DWConv, DWConvTranspose2d,
                                     Focus, GhostBottleneck, GhostConv, HGBlock, HGStem, Pose, RepC3, RepConv,
-                                    RTDETRDecoder, Segment, ConvOD, C2fOD, BottleneckOD, CABlock, FasterNet, C2fFaster)
+                                    RTDETRDecoder, Segment, ConvOD, C2fOD, BottleneckOD, CABlock, FasterNet, C2fFaster,
+                                    PatchMerging, PatchEmbedding, FasterBasicStage)
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8PoseLoss, v8SegmentationLoss
@@ -72,6 +74,8 @@ class BaseModel(nn.Module):
         """
         y, dt = [], []  # outputs
         for m in self.model:
+            # m.f表示yaml中当前模块m的第一个参数, 对于concat表示要连接的某几层数, 对于其他层, 可表示上一层数
+            # m.i表示yaml中当前模块m所在层数
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
@@ -224,6 +228,7 @@ class DetectionModel(BaseModel):
         super().__init__()
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
 
+        yaml_extra_load(cfg['yaml_file'] if isinstance(cfg, dict) else cfg, self.yaml)
         # Define model
         ch = self.yaml['ch'] = self.yaml.get('ch', ch)  # input channels
         if nc and nc != self.yaml['nc']:
@@ -332,6 +337,8 @@ class ClassificationModel(BaseModel):
     def _from_yaml(self, cfg, ch, nc, verbose):
         """Set YOLOv8 model configurations and define the model architecture."""
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
+        # parse extra modulename
+        yaml_extra_load(cfg['yaml_file'] if isinstance(cfg, dict) else cfg, self.yaml)
 
         # Define model
         ch = self.yaml['ch'] = self.yaml.get('ch', ch)  # input channels
@@ -654,6 +661,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     """Parse a YOLO model.yaml dictionary into a PyTorch model."""
     import ast
 
+    backbone_ch = []
     # Args
     max_channels = float('inf')
     nc, act, scales = (d.get(x) for x in ('nc', 'activation', 'scales'))
@@ -693,6 +701,37 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             if m in (BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, C3x, RepC3):
                 args.insert(2, n)  # number of repeats
                 n = 1
+        elif m is PatchEmbedding:
+            # used in FasterNet
+            v = int(d.get('FasterNet_scale'))
+            embed_dim = d.get('embed_dim')[v]
+            c1, c2 = ch[f], embed_dim
+            args = [c1, c2, *args]
+
+        elif m is FasterBasicStage:
+            # used in FasterNet
+            v = int(d.get('FasterNet_scale'))
+            embed_dim, depths, drop_path_rate, act_layer = d.get('embed_dim')[v], d.get('depths')[v], \
+                                                           d.get('drop_path_rate')[v], d.get('act_layer')[v]
+            dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
+            cur_stage_layer = args[0]
+            c1 = ch[f]
+            if act_layer == 'RELU':
+                act_layer = nn.ReLU
+            elif act_layer == 'GELU':
+                act_layer = nn.GELU
+            else:
+                raise NotImplementedError
+            args = [c1, depths[cur_stage_layer], dpr[sum(depths[: cur_stage_layer]): sum(depths[: cur_stage_layer + 1])],
+            act_layer, *args[1: ]]
+
+        elif m is PatchMerging:
+            # used in PatchMerging
+            v = int(d.get('FasterNet_scale'))
+            embed_dim = d.get('embed_dim')[v]
+            c1, c2 = ch[f], embed_dim * 2 ** args[0]
+            args = [c1, *args[1:]]
+
         elif m is AIFI:
             args = [ch[f], *args]
         elif m in (HGStem, HGBlock):
@@ -712,9 +751,17 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
+
         elif m in (CABlock, ):
             args = [ch[f], ch[f], *args]
             c2 = ch[f]
+        elif m is FasterNet:
+            # process the whole FasterNet
+            v = int(d.get('FasterNet_scale'))
+            embed_dim, depths, drop_path_rate, act_layer = d.get('embed_dim')[v], d.get('depths')[v], \
+                                                           d.get('drop_path_rate')[v], d.get('act_layer')[v]
+            args = [ch[f], embed_dim, depths, drop_path_rate, act_layer, *args]
+            backbone_ch = [embed_dim * 2 ** i  for i in range(4)]
         else:
             c2 = ch[f]
 
@@ -728,7 +775,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         layers.append(m_)
         if i == 0:
             ch = []
-        ch.append(c2)
+        if m in (FasterNet, ):
+            ch.extend(backbone_ch)
+        else:
+            ch.append(c2)
     return nn.Sequential(*layers), sorted(save)
 
 
@@ -748,6 +798,24 @@ def yaml_model_load(path):
     d['scale'] = guess_model_scale(path)
     d['yaml_file'] = str(path)
     return d
+
+def yaml_extra_load(path: str, d: t.Dict):
+    """
+    Introducing additional modules based on the YoloV8 model from a YAML file, and parsing different versions
+    of additional modules
+
+    note: if there are multiple versions of additional modules, plz put the module in the last of filename,
+    such as yolov8-FasterNet0.yaml
+    """
+    path = Path(path)
+    extra_modules = path.name.split('-')
+
+    with contextlib.suppress(AttributeError):
+        import re
+        for i in range(1, len(extra_modules)):
+            if 'FasterNet' in extra_modules[i]:
+                v = re.search(r'FasterNetV([012msl])', extra_modules[i]).group(1)
+                d['FasterNet_scale'] = v
 
 
 def guess_model_scale(model_path):

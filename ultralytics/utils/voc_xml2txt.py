@@ -4,7 +4,12 @@ import numpy as np
 from os import listdir
 from os.path import join
 
-classes = []
+classes = ['aeroplane', 'bicycle', 'bird', 'boat',
+    'bottle', 'bus', 'car', 'cat', 'chair',
+    'cow', 'diningtable', 'dog', 'horse',
+    'motorbike', 'person', 'pottedplant',
+    'sheep', 'sofa', 'train', 'tvmonitor'
+]
 
 
 def convert(size, box):

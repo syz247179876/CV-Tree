@@ -12,7 +12,7 @@ from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottlenec
                                     Classify, Concat, Conv, Conv2, ConvTranspose, Detect, DWConv, DWConvTranspose2d,
                                     Focus, GhostBottleneck, GhostConv, HGBlock, HGStem, Pose, RepC3, RepConv,
                                     RTDETRDecoder, Segment, ConvOD, C2fOD, BottleneckOD, CABlock, FasterNet, C2fFaster,
-                                    PatchMerging, PatchEmbedding, FasterBasicStage)
+                                    PatchMerging, PatchEmbedding, FasterBasicStage, SKBlock, SEBlock)
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8PoseLoss, v8SegmentationLoss
@@ -703,14 +703,15 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 n = 1
         elif m is PatchEmbedding:
             # used in FasterNet
-            v = int(d.get('FasterNet_scale'))
+            v = int(d.get('FasterNet_scale')) if d.get('FasterNet_scale') in ['0', '1', '2'] else d.get('FasterNet_scale')
             embed_dim = d.get('embed_dim')[v]
             c1, c2 = ch[f], embed_dim
             args = [c1, c2, *args]
 
         elif m is FasterBasicStage:
             # used in FasterNet
-            v = int(d.get('FasterNet_scale'))
+            v = int(d.get('FasterNet_scale')) if d.get('FasterNet_scale') in ['0', '1', '2'] else d.get(
+                'FasterNet_scale')
             embed_dim, depths, drop_path_rate, act_layer = d.get('embed_dim')[v], d.get('depths')[v], \
                                                            d.get('drop_path_rate')[v], d.get('act_layer')[v]
             dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
@@ -727,7 +728,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 
         elif m is PatchMerging:
             # used in PatchMerging
-            v = int(d.get('FasterNet_scale'))
+            v = int(d.get('FasterNet_scale')) if d.get('FasterNet_scale') in ['0', '1', '2'] else d.get('FasterNet_scale')
             embed_dim = d.get('embed_dim')[v]
             c1, c2 = ch[f], embed_dim * 2 ** args[0]
             args = [c1, *args[1:]]
@@ -752,12 +753,13 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
 
-        elif m in (CABlock, ):
+        elif m in (CABlock, SEBlock, SKBlock):
             args = [ch[f], ch[f], *args]
             c2 = ch[f]
         elif m is FasterNet:
             # process the whole FasterNet
-            v = int(d.get('FasterNet_scale'))
+            v = int(d.get('FasterNet_scale')) if d.get('FasterNet_scale') in ['0', '1', '2'] else d.get(
+                'FasterNet_scale')
             embed_dim, depths, drop_path_rate, act_layer = d.get('embed_dim')[v], d.get('depths')[v], \
                                                            d.get('drop_path_rate')[v], d.get('act_layer')[v]
             args = [ch[f], embed_dim, depths, drop_path_rate, act_layer, *args]

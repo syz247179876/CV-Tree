@@ -1,6 +1,7 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 """Block modules."""
 import math
+from functools import reduce
 
 import torch
 import torch.nn as nn
@@ -10,7 +11,8 @@ import typing as t
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, ConvOD, PartialConv
 from .transformer import TransformerBlock
 __all__ = ('DFL', 'HGBlock', 'HGStem', 'SPP', 'SPPF', 'C1', 'C2', 'C3', 'C2f', 'C2fOD', 'C3x', 'C3TR', 'C3Ghost',
-           'GhostBottleneck', 'Bottleneck', 'BottleneckCSP', 'BottleneckOD', 'Proto', 'RepC3', 'CABlock', 'C2fFaster')
+           'GhostBottleneck', 'Bottleneck', 'BottleneckCSP', 'BottleneckOD', 'Proto', 'RepC3', 'CABlock', 'C2fFaster',
+           'SEBlock', 'SKBlock')
 
 
 class DFL(nn.Module):
@@ -533,3 +535,154 @@ class CABlock(nn.Module):
         a_w = self.sigmoid(self.attn_w(x_w))
 
         return identity * a_w * a_h
+
+
+class SEBlock(nn.Module):
+    """
+    SE Block: A Channel Based Attention Mechanism.
+
+        Traditional convolution in computation, it blends the feature relationships of the channel
+    with the spatial relationships learned from the convolutional kernel, because a conv sum the
+    operation results of each channel, so, using SE Block to pay attention to more important channels,
+    suppress useless channels regard to current task.
+
+    SE Block Contains three parts:
+    1.Squeeze: Global Information Embedding.
+        Aggregate (H, W, C) dim to (1, 1, C) dim, use GAP to generate aggregation channel,
+    encode the entire spatial feature on a channel to a global feature.
+
+    2.Excitation: Adaptive Recalibration.
+        It aims to fully capture channel-wise dependencies and improve the representation of image,
+    by using two liner layer, one activation inside and sigmoid or softmax to normalize,
+    to produce channel-wise weights.
+        Maybe like using liner layer to extract feature map to classify, but this applies at channel
+    level and pay attention to channels with a large number of information.
+
+    3.Scale: feature recalibration.
+        Multiply the learned weight with the original features to obtain new features.
+        SE Block can be added to Residual Block.
+    """
+
+    def __init__(
+            self,
+            in_chans: int,
+            out_chans: int,
+            reduction: int = 16,
+            attention_mode: str = 'conv',
+            act_layer: t.Optional[nn.Module] = None,
+    ):
+        super(SEBlock, self).__init__()
+        if act_layer is None:
+            act_layer = nn.SiLU
+        # part 1:(H, W, C) -> (1, 1, C)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.attention_mode = attention_mode
+        # part 2, compute weight of each channel
+        if attention_mode == 'conv':
+            self.fc = nn.Sequential(
+                nn.Conv2d(in_chans, out_chans // reduction, 1, bias=False),
+                act_layer(inplace=True),
+                nn.Conv2d(out_chans // reduction, out_chans, 1, bias=False),
+                nn.Sigmoid(),
+            )
+        else:
+            self.fc = nn.Sequential(
+                nn.Linear(in_chans, out_chans // reduction, bias=False),
+                nn.ReLU(inplace=True),
+                nn.Linear(out_chans // reduction, in_chans, bias=False),
+                nn.Sigmoid(),  # nn.Softmax is OK here
+            )
+
+    def forward(self, x: torch.Tensor):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x)
+        if self.attention_mode != 'conv':
+            y = y.view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
+
+class SKBlock(nn.Module):
+    """
+    SK Module combines the Inception and SE ideas, considering different channels and kernel block.
+    It can split into three parts:
+
+        1.Split: For any feature map, using different size kernel convolutions(3x3, 5x5)
+        to extract new feature map. use dilation convolution (3x3, dilation=2) can
+        increase regularization to avoid over-fitting caused by large convolutional kernels
+        , add multi-scale information and increase receptive field.
+
+        2.Fuse: Fusing different output(last layer feature map) of different branch and
+        compute attention on channel-wise
+
+        3.Select: 'chunk, scale, fuse'.  Focusing on different convolutional kernels for different target sizes.
+    """
+
+    def __init__(
+            self,
+            in_chans: int,
+            out_chans: int,
+            reduction: int = 16,
+            attention_mode: str = 'conv',
+            act_layer: t.Optional[nn.Module] = None,
+            num: int = 2,
+            stride: int = 1,
+            groups: int = 1,
+    ):
+        """
+            num: the number of different kernel, by the way, it means the number of different branch, using
+                Inception ideas.
+            reduction: Multiple of dimensionality reduction, used to reduce params quantities and improve nonlinear
+                ability.
+            attention_mode: use linear layer(linear) or 1x1 convolution(conv)
+        """
+        super(SKBlock, self).__init__()
+        if act_layer is None:
+            act_layer = nn.SiLU
+        self.num = num
+        self.out_chans = out_chans
+        self.conv = nn.ModuleList()
+        for i in range(num):
+            self.conv.append(Conv(in_chans, out_chans, 3, s=stride, g=groups, d=1 + i,
+                                  act=True))
+
+        self.gap = nn.AdaptiveAvgPool2d((1, 1))
+        # fc can be implemented by 1x1 conv or linear
+        assert attention_mode in ['conv', 'linear'], 'fc layer should be implemented by conv or linear'
+        self.attention_mode = 'conv'
+        if attention_mode == 'conv':
+            self.fc = nn.Sequential(
+                # use relu act to improve nonlinear expression ability
+                nn.Conv2d(in_chans, out_chans // reduction, 1, bias=False),
+                act_layer(inplace=True),
+                nn.Conv2d(out_chans // reduction, out_chans * self.num, 1, bias=False),
+            )
+        else:
+            self.fc = nn.Sequential(
+                nn.Linear(in_chans, out_chans // reduction, bias=False),
+                act_layer(inplace=True),
+                nn.Linear(out_chans // reduction, out_chans * self.num, bias=False)
+            )
+        # compute channels weight
+        self.softmax = nn.Softmax(dim=1)
+
+    def forward(self, x: torch.Tensor):
+        batch, c, _, _ = x.size()
+        # use different convolutional kernel to conv
+        temp_feature = [conv(x) for conv in self.conv]
+        # fuse different output
+        u = reduce(lambda a, b: a + b, temp_feature)
+        # squeeze
+        u = self.gap(u)
+        # excitation
+        if self.attention_mode != 'conv':
+            u = u.view(batch, c)
+        z = self.fc(u)
+        z = z.reshape(batch, self.num, self.out_chans, -1)
+        z = self.softmax(z)
+        # select
+        a_b_weight: t.List[..., torch.Tensor] = torch.chunk(z, self.num, dim=1)
+        a_b_weight = [c.reshape(batch, self.out_chans, 1, 1) for c in a_b_weight]
+        v = map(lambda weight, feature: weight * feature, a_b_weight, temp_feature)
+        v = reduce(lambda a, b: a + b, v)
+        return v

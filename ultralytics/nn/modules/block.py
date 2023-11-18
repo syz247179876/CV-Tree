@@ -624,8 +624,8 @@ class SKBlock(nn.Module):
             out_chans: int,
             reduction: int = 16,
             attention_mode: str = 'conv',
-            act_layer: t.Optional[nn.Module] = None,
             num: int = 2,
+            act_layer: t.Optional[nn.Module] = None,
             stride: int = 1,
             groups: int = 1,
     ):

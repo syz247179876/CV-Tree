@@ -727,6 +727,8 @@ class BoTAttention(nn.Module):
         qkv = qkv.reshape(batch, 3, self.head_num, c // self.head_num, -1).permute(1, 0, 2, 3, 4)
         # q, k, v dim is (b, head_num, head_dim, length)
         q, k, v = qkv[0], qkv[1], qkv[2]
+        # define position encoding based on the height and width of x, and preventing conflicts with checking
+        # the model for forward before training
         if self.flag == 0 and batch != 1:
             self.flag = 1
             self.rw = None

@@ -12,7 +12,7 @@ from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, ConvOD, PartialCo
 from .transformer import TransformerBlock
 __all__ = ('DFL', 'HGBlock', 'HGStem', 'SPP', 'SPPF', 'C1', 'C2', 'C3', 'C2f', 'C2fOD', 'C3x', 'C3TR', 'C3Ghost',
            'GhostBottleneck', 'Bottleneck', 'BottleneckCSP', 'BottleneckOD', 'Proto', 'RepC3', 'CABlock', 'C2fFaster',
-           'SEBlock', 'SKBlock')
+           'SEBlock', 'SKBlock', 'C2fBoT')
 
 
 class DFL(nn.Module):
@@ -686,3 +686,107 @@ class SKBlock(nn.Module):
         v = map(lambda weight, feature: weight * feature, a_b_weight, temp_feature)
         v = reduce(lambda a, b: a + b, v)
         return v
+
+
+class BoTAttention(nn.Module):
+    """
+    Basic self-attention layer with relative position embedding, but there are some difference from original
+    transformer, difference as following:
+
+    1.use relative position embedding
+    2.use 1x1 convolution kernel to generate q, k, v instead of Linear layer.
+
+    note:
+    The representation quality encoded by relative position encoding is better than that encoded by absolute
+    position encoding
+    """
+
+    def __init__(
+            self,
+            dim: int,
+            head_num: int = 4,
+            qkv_bias: bool = False,
+    ):
+        super(BoTAttention, self).__init__()
+        self.head_num = head_num
+        self.head_dim = dim // head_num
+
+        self.scale = qkv_bias or self.head_dim ** -0.5
+        self.qkv = nn.Conv2d(dim, dim * 3, kernel_size=1, bias=qkv_bias)
+        self.flag = 0
+        # relative position embedding Rh and Rw, each head is isolated
+        self.rw = None
+        self.rh = None
+        # self.rw = nn.Parameter(torch.randn((1, head_num, self.head_dim, 1, width)), requires_grad=True)
+        # self.rh = nn.Parameter(torch.randn((1, head_num, self.head_dim, height, 1)), requires_grad=True)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x: torch.Tensor):
+        batch, c, h, w = x.size()
+        qkv = self.qkv(x)
+        qkv = qkv.reshape(batch, 3, self.head_num, c // self.head_num, -1).permute(1, 0, 2, 3, 4)
+        # q, k, v dim is (b, head_num, head_dim, length)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        if self.flag == 0 and batch != 1:
+            self.flag = 1
+            self.rw = None
+            self.rh = None
+        if getattr(self, 'rw') is None:
+            setattr(self, 'rw', nn.Parameter(torch.rand((1, self.head_num, self.head_dim, 1, w)).type_as(x), requires_grad=True))
+        if getattr(self, 'rh') is None:
+            setattr(self, 'rh', nn.Parameter(torch.rand((1, self.head_num, self.head_dim, h, 1)).type_as(x), requires_grad=True))
+        # compute attention for content
+        attn_content = (q.transpose(-2, -1) @ k) * self.scale
+
+        # compute attention for position
+        r = (self.rw + self.rh).view(1, self.head_num, self.head_dim, -1)
+        attn_position = (q.transpose(-2, -1) @ r) * self.scale
+        attn = self.softmax(attn_content + attn_position)
+
+        attn = (attn @ v.transpose(-2, -1)).permute(0, 1, 3, 2).reshape(batch, c, h, w)
+        return attn
+
+
+class BoTBottleneck(nn.Module):
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            shortcut: bool = True,
+            g: int = 1,
+            k: t.Tuple = (3, 3),
+            e: float = 0.5,
+            head_num: int = 4
+    ):
+        """
+        """
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, k[0], 1)
+        self.attention = BoTAttention(c_, head_num=head_num)
+        self.cv2 = nn.Conv2d(c_, c2, 1, 1, bias=False)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = nn.SiLU(inplace=True)
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x):
+        """'forward()' applies the YOLO FPN to input data."""
+        return x + self.act(self.bn(self.cv2(self.attention(self.cv1(x))))) if self.add else \
+            self.act(self.bn(self.cv2(self.attention(self.cv1(x)))))
+
+
+class C2fBoT(C2f):
+
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            n: int = 1,
+            shortcut: bool = False,
+            head_num: int = 4,
+            g: int = 1,
+            e: float = 0.5
+    ):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(BoTBottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0,
+                                             head_num=head_num) for _ in range(n))

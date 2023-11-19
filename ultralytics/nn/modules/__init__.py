@@ -33,4 +33,5 @@ __all__ = ('Conv', 'Conv2', 'LightConv', 'RepConv', 'DWConv', 'DWConvTranspose2d
            'Segment', 'Pose', 'Classify', 'TransformerEncoderLayer', 'RepC3', 'RTDETRDecoder', 'AIFI',
            'DeformableTransformerDecoder', 'DeformableTransformerDecoderLayer', 'MSDeformAttn', 'MLP',
            'ConvOD', 'ODConv', 'C2fOD', 'BottleneckOD', 'CABlock', 'FasterNet', 'C2fFaster',
-           'FasterNetBlock', 'PatchEmbedding', 'PatchMerging', 'FasterBasicStage', 'SKBlock', 'SEBlock', 'C2fBoT')
+           'FasterNetBlock', 'PatchEmbedding', 'PatchMerging', 'FasterBasicStage', 'SKBlock', 'SEBlock', 'C2fBoT',
+           )

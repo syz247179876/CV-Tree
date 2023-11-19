@@ -704,6 +704,8 @@ class BoTAttention(nn.Module):
     def __init__(
             self,
             dim: int,
+            width: int,
+            height: int,
             head_num: int = 4,
             qkv_bias: bool = False,
     ):
@@ -715,10 +717,10 @@ class BoTAttention(nn.Module):
         self.qkv = nn.Conv2d(dim, dim * 3, kernel_size=1, bias=qkv_bias)
         self.flag = 0
         # relative position embedding Rh and Rw, each head is isolated
-        self.rw = None
-        self.rh = None
-        # self.rw = nn.Parameter(torch.randn((1, head_num, self.head_dim, 1, width)), requires_grad=True)
-        # self.rh = nn.Parameter(torch.randn((1, head_num, self.head_dim, height, 1)), requires_grad=True)
+        # self.rw = None
+        # self.rh = None
+        self.rw = nn.Parameter(torch.randn((1, head_num, self.head_dim, 1, width)), requires_grad=True)
+        self.rh = nn.Parameter(torch.randn((1, head_num, self.head_dim, height, 1)), requires_grad=True)
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x: torch.Tensor):
@@ -729,14 +731,15 @@ class BoTAttention(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]
         # define position encoding based on the height and width of x, and preventing conflicts with checking
         # the model for forward before training
-        if self.flag == 0 and batch != 1:
-            self.flag = 1
-            self.rw = None
-            self.rh = None
-        if getattr(self, 'rw') is None:
-            setattr(self, 'rw', nn.Parameter(torch.rand((1, self.head_num, self.head_dim, 1, w)).type_as(x), requires_grad=True))
-        if getattr(self, 'rh') is None:
-            setattr(self, 'rh', nn.Parameter(torch.rand((1, self.head_num, self.head_dim, h, 1)).type_as(x), requires_grad=True))
+        # if self.flag == 0 and batch != 1:
+        #     self.flag = 1
+        #     self.rw = None
+        #     self.rh = None
+        # if getattr(self, 'rw') is None:
+        #     setattr(self, 'rw', nn.Parameter(torch.rand((1, self.head_num, self.head_dim, 1, w)).type_as(x), requires_grad=True))
+        # if getattr(self, 'rh') is None:
+        #     setattr(self, 'rh', nn.Parameter(torch.rand((1, self.head_num, self.head_dim, h, 1)).type_as(x), requires_grad=True))
+
         # compute attention for content
         attn_content = (q.transpose(-2, -1) @ k) * self.scale
 
@@ -754,6 +757,7 @@ class BoTBottleneck(nn.Module):
             self,
             c1: int,
             c2: int,
+            f_size: int = 20,
             shortcut: bool = True,
             g: int = 1,
             k: t.Tuple = (3, 3),
@@ -765,7 +769,7 @@ class BoTBottleneck(nn.Module):
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, c_, k[0], 1)
-        self.attention = BoTAttention(c_, head_num=head_num)
+        self.attention = BoTAttention(c_, f_size, f_size, head_num=head_num)
         self.cv2 = nn.Conv2d(c_, c2, 1, 1, bias=False)
         self.bn = nn.BatchNorm2d(c2)
         self.act = nn.SiLU(inplace=True)
@@ -784,11 +788,12 @@ class C2fBoT(C2f):
             c1: int,
             c2: int,
             n: int = 1,
+            f_size: int = 20,
             shortcut: bool = False,
             head_num: int = 4,
             g: int = 1,
             e: float = 0.5
     ):
         super().__init__(c1, c2, n, shortcut, g, e)
-        self.m = nn.ModuleList(BoTBottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0,
+        self.m = nn.ModuleList(BoTBottleneck(self.c, self.c, f_size, shortcut, g, k=((3, 3), (3, 3)), e=1.0,
                                              head_num=head_num) for _ in range(n))

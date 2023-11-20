@@ -135,6 +135,7 @@ class BaseTrainer:
         self.loss_names = ['Loss']
         self.csv = self.save_dir / 'results.csv'
         self.plot_idx = [0, 1, 2]
+        self.freeze_layers_map = None
 
         # Callbacks
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
@@ -201,6 +202,7 @@ class BaseTrainer:
             rank=RANK,
             world_size=world_size)
 
+
     def _setup_train(self, world_size):
         """Builds dataloaders and optimizer on correct rank process."""
 
@@ -215,16 +217,18 @@ class BaseTrainer:
             self.args.freeze, list) else range(self.args.freeze) if isinstance(self.args.freeze, int) else []
         always_freeze_names = ['.dfl']  # always freeze these layers
         freeze_layer_names = [f'model.{x}.' for x in freeze_list] + always_freeze_names
+        freeze_layers_map = set()
         for k, v in self.model.named_parameters():
             # v.register_hook(lambda x: torch.nan_to_num(x))  # NaN to 0 (commented for erratic training results)
             if any(x in k for x in freeze_layer_names):
                 LOGGER.info(f"Freezing layer '{k}'")
                 v.requires_grad = False
+                freeze_layers_map.add(k)
             elif not v.requires_grad:
                 LOGGER.info(f"WARNING ⚠️ setting 'requires_grad=True' for frozen layer '{k}'. "
                             'See ultralytics.engine.trainer for customization of frozen layers.')
                 v.requires_grad = True
-
+        self.freeze_layers_map = freeze_layers_map
         # Check AMP
         self.amp = torch.tensor(self.args.amp).to(self.device)  # True or False
         if self.amp and RANK in (-1, 0):  # Single-GPU and DDP
@@ -301,6 +305,14 @@ class BaseTrainer:
             self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
         epoch = self.epochs  # predefine for resume fully trained model edge cases
         for epoch in range(self.start_epoch, self.epochs):
+
+            # when epoch attend certain value, unfreeze these layers
+            if epoch == self.args.unfreeze:
+                for k, v in self.model.name_parameters():
+                    if k in self.freeze_layers_map:
+                        v.requires_grad = True
+
+
             self.epoch = epoch
             self.run_callbacks('on_train_epoch_start')
             self.model.train()

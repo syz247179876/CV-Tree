@@ -229,8 +229,8 @@ class DetectionModel(BaseModel):
         """Initialize the YOLOv8 detection model with the given config and parameters."""
         super().__init__()
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
-
-        yaml_extra_load(cfg['yaml_file'] if isinstance(cfg, dict) else cfg, self.yaml)
+        if isinstance(cfg, dict) and 'yaml_file' in cfg:
+            yaml_extra_load(cfg['yaml_file'], self.yaml)
         # Define model
         ch = self.yaml['ch'] = self.yaml.get('ch', ch)  # input channels
         if nc and nc != self.yaml['nc']:
@@ -340,7 +340,8 @@ class ClassificationModel(BaseModel):
         """Set YOLOv8 model configurations and define the model architecture."""
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
         # parse extra modulename
-        yaml_extra_load(cfg['yaml_file'] if isinstance(cfg, dict) else cfg, self.yaml)
+        if isinstance(cfg, dict) and 'yaml_file' in cfg:
+            yaml_extra_load(cfg['yaml_file'], self.yaml)
 
         # Define model
         ch = self.yaml['ch'] = self.yaml.get('ch', ch)  # input channels

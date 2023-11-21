@@ -13,6 +13,7 @@ from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottlenec
                                     Focus, GhostBottleneck, GhostConv, HGBlock, HGStem, Pose, RepC3, RepConv,
                                     RTDETRDecoder, Segment, ConvOD, C2fOD, BottleneckOD, CABlock, FasterNet, C2fFaster,
                                     PatchMerging, PatchEmbedding, FasterBasicStage, SKBlock, SEBlock, C2fBoT,
+                                    MobileViTBlock, MV2Block
                                     )
 from ultralytics.nn.attention import BiLevelRoutingAttention, BiFormerBlock
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
@@ -770,6 +771,15 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             backbone_ch = [embed_dim * 2 ** i  for i in range(4)]
         elif m is BiLevelRoutingAttention:
             args = [ch[f], *args]
+        elif m is MV2Block:
+            c1, c2 = ch[f], args[0]
+            args = [c1, c2, *args[1:]]
+        elif m is MobileViTBlock:
+            kernel_size, head_num, mlp_ratio, patch_size = d.get('kernel_size'), d.get('head_num'), \
+                                                           d.get('mlp_ratio'),d.get('patch_size')
+
+            c1, c2, dim, depth = ch[f], args[0], args[1], args[2]
+            args = [c1, dim, depth, kernel_size, patch_size, head_num, mlp_ratio, *args[3:]]
         else:
             c2 = ch[f]
 

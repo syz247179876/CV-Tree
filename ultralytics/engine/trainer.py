@@ -307,8 +307,8 @@ class BaseTrainer:
         for epoch in range(self.start_epoch, self.epochs):
 
             # when epoch attend certain value, unfreeze these layers
-            if epoch == self.args.unfreeze:
-                for k, v in self.model.name_parameters():
+            if epoch == self.args.unfreeze and len(self.freeze_layers_map) > 0:
+                for k, v in self.model.named_parameters():
                     if k in self.freeze_layers_map:
                         v.requires_grad = True
 

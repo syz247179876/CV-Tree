@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 import typing as t
+import torch.nn.functional as F
 from einops import rearrange
+
 
 __all__ = ['MV2Block', 'MobileViTBlock']
 
@@ -121,10 +123,10 @@ class Attention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop_ratio)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop_ratio)
-
         self.patch_size = patch_size
 
     def forward(self, x: torch.Tensor):
+
         qkv = self.qkv(x).chunk(3, dim=-1)
         # 把每个patch的大小放在第二维度, 这样在做Q @ K时, 实际上是基于像素级细粒度, 每个patch中的各个像素点的值的注意力值不相同
         q, k, v = map(lambda t: rearrange(t, 'b p_s n (h d) -> b p_s h n d', h=self.num_heads), qkv)
@@ -200,6 +202,7 @@ class MobileViTBlock(nn.Module):
             channel: int,
             dim: int,
             depth: int,
+            auto_pad: bool = True,
             kernel_size: int = 3,
             patch_size: int = 2,
             num_head: int = 8,
@@ -215,6 +218,7 @@ class MobileViTBlock(nn.Module):
         """
         super(MobileViTBlock, self).__init__()
         # use to learn local representation
+        self.auto_pad = auto_pad
         self.ph, self.pw = patch_size, patch_size
         self.conv1 = Conv(channel, channel, kernel_size=kernel_size, act_layer=nn.SiLU)
         self.conv2 = Conv(channel, dim, kernel_size=1, act_layer=nn.SiLU)
@@ -227,9 +231,26 @@ class MobileViTBlock(nn.Module):
         self.conv4 = Conv(2 * channel, channel, kernel_size=kernel_size, act_layer=nn.SiLU)
 
     def forward(self, x: torch.Tensor):
+        # used in validation
+
+        if self.auto_pad:
+            n, c, _h, _w = x.size()
+
+            pad_l = pad_t = 0
+            pad_r = (self.pw - _w % self.pw) % self.pw
+            pad_b = (self.ph - _h % self.ph) % self.ph
+            x = F.pad(x, (pad_l, pad_r,  # dim=-1
+                          pad_t, pad_b,  # dim=-2
+                          0, 0))  # dim=-3
+            _, c, h, w = x.size()  # padded size
+        else:
+            b, c, h, w = x.size()
+            assert h % self.ph == 0 and w % self.pw == 0
+
         identity = x
         y = self.conv1(x)
         y = self.conv2(y)
+
         _, _, h, w = y.shape
         y = rearrange(y, 'b c (h ph) (w pw) -> b (ph pw) (h w) c', ph=self.ph, pw=self.pw)
         for transformer in self.transformers:
@@ -239,6 +260,10 @@ class MobileViTBlock(nn.Module):
         y = self.conv3(y)
         y = torch.cat((identity, y), dim=1)
         y = self.conv4(y)
+
+        # crop padded region
+        if self.auto_pad and (pad_r > 0 or pad_b > 0):
+            y = y[:, :, :_h, :_w].contiguous()
         return y
 
 

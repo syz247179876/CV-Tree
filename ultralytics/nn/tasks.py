@@ -775,11 +775,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c1, c2 = ch[f], args[0]
             args = [c1, c2, *args[1:]]
         elif m is MobileViTBlock:
-            kernel_size, head_num, mlp_ratio, patch_size = d.get('kernel_size'), d.get('head_num'), \
-                                                           d.get('mlp_ratio'),d.get('patch_size')
+            kernel_size, head_num, mlp_ratio, patch_size, auto_pad = d.get('kernel_size'), d.get('head_num'), \
+                                                           d.get('mlp_ratio'), d.get('patch_size'), d.get('auto_pad')
 
             c1, c2, dim, depth = ch[f], args[0], args[1], args[2]
-            args = [c1, dim, depth, kernel_size, patch_size, head_num, mlp_ratio, *args[3:]]
+            args = [c1, dim, depth, auto_pad, kernel_size, patch_size, head_num, mlp_ratio, *args[3:]]
         else:
             c2 = ch[f]
 

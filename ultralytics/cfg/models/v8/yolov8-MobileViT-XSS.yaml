@@ -38,6 +38,8 @@ mlp_ratio: 4.
 # kernel size in Transformer Block
 kernel_size: 3
 
+auto_pad: True
+
 # YOLOv8.0n backbone
 backbone:
   # [from, repeats, module, args]

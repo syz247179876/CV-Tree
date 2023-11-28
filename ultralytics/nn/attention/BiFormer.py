@@ -87,6 +87,7 @@ class KVGather(nn.Module):
         topk = r_idx.size(-1)
         # print(r_idx.size(), r_weight.size())
         # FIXME: gather consumes much memory (topk times redundancy), write cuda kernel?
+        # 对每一个query在key/value维度选择r_idx指定的索引的key_value
         topk_kv = torch.gather(kv.view(n, 1, p2, w2, c_kv).expand(-1, p2, -1, -1, -1),
                                # (n, p^2, p^2, w^2, c_kv) without mem cpy
                                dim=2,

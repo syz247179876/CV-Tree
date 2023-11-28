@@ -323,7 +323,7 @@ class BiLevelRoutingAttention(nn.Module):
 class BiFormerBlock(nn.Module):
     def __init__(self, dim, out_dim, n_win, drop_path=0., layer_scale_init_value=-1,
                  num_heads=8, qk_dim=None, qk_scale=None,
-                 kv_per_win=4, kv_downsample_ratio=4, kv_downsample_kernel=None, kv_downsample_mode='ada_avgpool',
+                 kv_per_win=4, kv_downsample_ratio=4, kv_downsample_kernel=None, kv_downsample_mode='identity',
                  topk=4, param_attention="qkvo", param_routing=False, diff_routing=False, soft_routing=False,
                  mlp_ratio=4, mlp_dwconv=False,
                  side_dwconv=5, before_attn_dwconv=3, pre_norm=True, auto_pad=True):

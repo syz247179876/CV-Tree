@@ -233,26 +233,30 @@ class BaseTrainer:
         self.amp = torch.tensor(self.args.amp).to(self.device)  # True or False
         if self.amp and RANK in (-1, 0):  # Single-GPU and DDP
             callbacks_backup = callbacks.default_callbacks.copy()  # backup callbacks as check_amp() resets them
+            # 判断是否启用AMP, 会调用predict两次
             self.amp = torch.tensor(check_amp(self.model), device=self.device)
             callbacks.default_callbacks = callbacks_backup  # restore callbacks
         if RANK > -1 and world_size > 1:  # DDP
             dist.broadcast(self.amp, src=0)  # broadcast the tensor from rank 0 to all other ranks (returns None)
         self.amp = bool(self.amp)  # as boolean
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.amp)
+        # 是否开启多卡训练
         if world_size > 1:
             self.model = nn.parallel.DistributedDataParallel(self.model, device_ids=[RANK])
 
         # Check imgsz
         gs = max(int(self.model.stride.max() if hasattr(self.model, 'stride') else 32), 32)  # grid size (max stride)
+        # 修剪图像尺寸, 使之为stride的倍数, 若不满足倍数, 则向上取整到最接近的倍数值
         self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1)
 
-        # Batch size
+        # Batch size, 当使用单核GPU, 检查最佳的batch_size
         if self.batch_size == -1 and RANK == -1:  # single-GPU only, estimate best batch size
             self.args.batch = self.batch_size = check_train_batch_size(self.model, self.args.imgsz, self.amp)
 
         # Dataloaders
         batch_size = self.batch_size // max(world_size, 1)
         self.train_loader = self.get_dataloader(self.trainset, batch_size=batch_size, rank=RANK, mode='train')
+        # 验证集使用训练集的两倍
         if RANK in (-1, 0):
             self.test_loader = self.get_dataloader(self.testset, batch_size=batch_size * 2, rank=-1, mode='val')
             self.validator = self.get_validator()
@@ -263,6 +267,7 @@ class BaseTrainer:
                 self.plot_training_labels()
 
         # Optimizer
+        # 优化
         self.accumulate = max(round(self.args.nbs / self.batch_size), 1)  # accumulate loss before optimizing
         weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs  # scale weight_decay
         iterations = math.ceil(len(self.train_loader.dataset) / max(self.batch_size, self.args.nbs)) * self.epochs
@@ -278,7 +283,9 @@ class BaseTrainer:
         else:
             self.lf = lambda x: (1 - x / self.epochs) * (1.0 - self.args.lrf) + self.args.lrf  # linear
         self.scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=self.lf)
+        # 每一轮进行判断, 当best_fitness(mAP)经过很多epoch没有发生变化, 大于指定的patience时, 提前结束, return True
         self.stopper, self.stop = EarlyStopping(patience=self.args.patience), False
+        # 断点续训
         self.resume_training(ckpt)
         self.scheduler.last_epoch = self.start_epoch - 1  # do not move
         self.run_callbacks('on_pretrain_routine_end')
@@ -300,6 +307,7 @@ class BaseTrainer:
                     f'Using {self.train_loader.num_workers * (world_size or 1)} dataloader workers\n'
                     f"Logging results to {colorstr('bold', self.save_dir)}\n"
                     f'Starting training for {self.epochs} epochs...')
+        # 倒数关闭mosaic的epoch个数
         if self.args.close_mosaic:
             base_idx = (self.epochs - self.args.close_mosaic) * nb
             self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
@@ -333,8 +341,16 @@ class BaseTrainer:
                 self.run_callbacks('on_train_batch_start')
                 # Warmup
                 ni = i + nb * epoch
+                # warm up
+                # 1.有利于缓解模型在初始阶段对min-batch过拟合现象，保持分布均衡。
+                # 2.有利于由于刚开始训练的时候，模型的权重是随机初始化的，此时如果选择一个较大的学习率，可能带来模型的不稳定（震荡），选择预热学习率的方式，可以使得开始训练的几个epoch或者一些step内学习率较小，
+                # 在预热的小学习率下，模型可以慢慢的趋于稳定，等模型相对稳定后再去选择预先设定的学习率进行训练，使得模型收敛的速度变得更快，模型的效果更好。
+                # 3.warmup可以线性从0慢慢升到指定lr, 然后再从指定lr之间降低
+                # 4.在warmup阶段采用累积梯度计算，形成fake large-batch, 避免对min-batch学歪掉。
                 if ni <= nw:
                     xi = [0, nw]  # x interp
+                    # 意思是累积梯度, 直到batch_size达到名义上的batch, 默认为64
+                    # 使用线性插值计算accumulate, lr, momentum
                     self.accumulate = max(1, np.interp(ni, xi, [1, self.args.nbs / self.batch_size]).round())
                     for j, x in enumerate(self.optimizer.param_groups):
                         # Bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
@@ -343,7 +359,7 @@ class BaseTrainer:
                         if 'momentum' in x:
                             x['momentum'] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
 
-                # Forward
+                # Forward, 在前向传播时, 自动针对某些算子，如Conv, BN等进行精度转换, 由FP32 -> FP16, 减小计算和内存开销。
                 with torch.cuda.amp.autocast(self.amp):
                     batch = self.preprocess_batch(batch)
                     self.loss, self.loss_items = self.model(batch)
@@ -352,11 +368,13 @@ class BaseTrainer:
                     self.tloss = (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None \
                         else self.loss_items
 
-                # Backward
+                # Backward, 在反向传播时, 对Loss进行scale放大2的k次幂,转为FP16,计算梯度
                 self.scaler.scale(self.loss).backward()
 
                 # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
+                # 累积batch进行更行
                 if ni - last_opt_step >= self.accumulate:
+                    # AMP unscale更新梯度
                     self.optimizer_step()
                     last_opt_step = ni
 

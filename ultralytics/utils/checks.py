@@ -569,7 +569,7 @@ def check_amp(model):
     This function checks the PyTorch Automatic Mixed Precision (AMP) functionality of a YOLOv8 model. If the checks
     fail, it means there are anomalies with AMP on the system that may cause NaN losses or zero-mAP results, so AMP will
     be disabled during training.
-
+    检查使用
     Args:
         model (nn.Module): A YOLOv8 model instance.
 
@@ -591,10 +591,14 @@ def check_amp(model):
 
     def amp_allclose(m, im):
         """All close FP32 vs AMP results."""
+        """
+        比较使用原始FP32和AMP后推理结果是否接近, 如果接近, 则开启AMP有效
+        """
         a = m(im, device=device, verbose=False)[0].boxes.data  # FP32 inference
         with torch.cuda.amp.autocast(True):
             b = m(im, device=device, verbose=False)[0].boxes.data  # AMP inference
         del m
+        # torch.allclose()比较两个浮点数是否接近
         return a.shape == b.shape and torch.allclose(a, b.float(), atol=0.5)  # close to 0.5 absolute tolerance
 
     im = ASSETS / 'bus.jpg'  # image to check

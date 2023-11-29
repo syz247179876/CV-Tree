@@ -1,3 +1,4 @@
+import argparse
 import os
 
 import cv2
@@ -6,7 +7,7 @@ import torch
 import typing as t
 from ultralytics.utils import ASSETS, yaml_load
 
-__all__ = ['BaseInference', ]
+__all__ = ['BaseInference', 'Args']
 class BaseInference(object):
 
     """
@@ -16,7 +17,6 @@ class BaseInference(object):
     def __init__(
             self,
             model_path: str,
-            image_path: str,
             conf_thres: float,
             iou_thres: float,
             data_classes: t.Union[t.Dict, str],
@@ -27,7 +27,6 @@ class BaseInference(object):
             use_gpu: bool = False,
     ):
         self.model_path = model_path
-        self.image_path = image_path
         self.conf_thres = conf_thres
         self.iou_thres = iou_thres
         self.input_width, self.input_height = img_size
@@ -54,20 +53,20 @@ class BaseInference(object):
         """
         pass
 
-    def preprocess(self, *args, **kwargs) -> t.Union[torch.Tensor, np.ndarray]:
+    def preprocess(self, image_path: str, *args, **kwargs) -> t.Union[torch.Tensor, np.ndarray]:
         """
         Preprocesses the input image before performing inference.
         Returns:
             image_data: Preprocessed image data ready for inference.
         """
         # Read the input image using OpenCV
-        self.img = cv2.imread(self.image_path)
+        _img = cv2.imread(image_path)
 
         # Get the height and width of the input image
-        self.img_height, self.img_width = self.img.shape[:2]
+        self.img_height, self.img_width = _img.shape[:2]
 
         # Convert the image color space from BGR to RGB
-        img = cv2.cvtColor(self.img, cv2.COLOR_BGR2RGB)
+        img = cv2.cvtColor(_img, cv2.COLOR_BGR2RGB)
 
         # Resize the image to match the input shape
         img = cv2.resize(img, (self.input_width, self.input_height))
@@ -84,7 +83,7 @@ class BaseInference(object):
         return image_data
 
 
-    def main(self):
+    def main(self, *args, **kwargs):
         """
          Performs inference using a different model or inference engine and returns the dict of output image
 
@@ -101,3 +100,27 @@ class BaseInference(object):
         Returns: dict
         """
         pass
+
+
+class Args(object):
+
+    def __init__(self):
+
+        self.parser = argparse.ArgumentParser()
+        self.parser.add_argument('--data', type=str, default=r'D:\projects\yolov8\ultralytics\ultralytics\cfg\datasets\coco8.yaml', help='Input your data.')
+        self.parser.add_argument('--use_gpu', action='store_true', default=False, help='Use gpu or not.')
+        self.parser.add_argument('--model', type=str, default= r'C:\yolov8\runs\detect\train-ExDark.yaml-ODConv-neck\weights\best.pt', help='Input your model.')
+        self.parser.add_argument('--images_dir', type=str, default=r'C:\dataset\OpenDataLab___ExDark\ExDark_yolo\ExDark_yolo\images\temp', help='dir to input image.')
+        self.parser.add_argument('--conf-thres', type=float, default=0.45, help='Confidence threshold')
+        self.parser.add_argument('--iou-thres', type=float, default=0.45, help='NMS IoU threshold')
+        self.parser.add_argument('--device', type=str, default='cpu', help='equipment of inference')
+        self.parser.add_argument('--half', action='store_true', default=False, help='whether use FP16 in inference')
+        self.parser.add_argument('--fuse', action='store_true', default=False, help='whether fusion some op in inference')
+        self.opts = None
+    def set_args(self):
+        self.opts = self.parser.parse_args()
+        if self.opts.use_gpu or 'cuda' in self.opts.device:
+            self.opts.device = torch.device('cuda' if self.opts.use_gpu else 'cpu')
+            self.opts.use_gpu = True
+
+

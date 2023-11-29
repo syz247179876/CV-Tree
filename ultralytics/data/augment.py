@@ -324,6 +324,7 @@ class RandomPerspective:
         apply_keypoints(keypoints, M): Transforms keypoints.
         __call__(labels): Main method to apply transformations to both images and their corresponding annotations.
         box_candidates(box1, box2): Filters out bounding boxes that don't meet certain criteria post-transformation.
+    随机透视和仿射变换
     """
 
     def __init__(self,
@@ -714,6 +715,7 @@ class CopyPaste:
     """
     Implements the Copy-Paste augmentation as described in the paper https://arxiv.org/abs/2012.07177. This class is
     responsible for applying the Copy-Paste augmentation on images and their corresponding instances.
+    # 将已有图像的部分赋值到其他图像中
     """
 
     def __init__(self, p=0.5) -> None:
@@ -938,10 +940,15 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
             raise ValueError(f'data.yaml flip_idx={flip_idx} length must be equal to kpt_shape[0]={kpt_shape[0]}')
 
     return Compose([
+        # Mosaic, 粘贴赋值, 放射变换, 透视变换
         pre_transform,
+        # 线性插值的方法生成一个新的向量和对应的labell，作为增强的数据
         MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
+        #
         Albumentations(p=1.0),
+        # 颜色变换
         RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
+        # 随机翻转
         RandomFlip(direction='vertical', p=hyp.flipud),
         RandomFlip(direction='horizontal', p=hyp.fliplr, flip_idx=flip_idx)])  # transforms
 

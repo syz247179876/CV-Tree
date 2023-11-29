@@ -138,6 +138,7 @@ class YOLODataset(BaseDataset):
         """Builds and appends transforms to the list."""
         if self.augment:
             hyp.mosaic = hyp.mosaic if self.augment and not self.rect else 0.0
+            # 随机将两张样本按比例混合
             hyp.mixup = hyp.mixup if self.augment and not self.rect else 0.0
             transforms = v8_transforms(self, self.imgsz, hyp)
         else:

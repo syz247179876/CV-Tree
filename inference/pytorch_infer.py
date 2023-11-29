@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import time
@@ -6,7 +7,7 @@ import time
 import torch
 import typing as t
 
-from inference.base_infer import BaseInference
+from inference.base_infer import BaseInference, Args
 from ultralytics.utils import ops
 
 
@@ -19,9 +20,8 @@ class PytorchInference(BaseInference):
     def __init__(
             self,
             model_path: str,
-            image_path: str,
             conf_thres: float = 0.3,
-            iou_thres: float = 0.05,
+            iou_thres: float = 0.45,
             data_classes: t.Union[t.Dict, str] = 'coco8.yaml',
             max_det: int = 1000,
             img_size: t.Tuple = (640, 640),
@@ -29,7 +29,7 @@ class PytorchInference(BaseInference):
             fuse: bool = True,
             use_gpu: bool = True,
     ):
-        super().__init__(model_path, image_path, conf_thres, iou_thres, data_classes, max_det, img_size, half, fuse,
+        super().__init__(model_path, conf_thres, iou_thres, data_classes, max_det, img_size, half, fuse,
                          use_gpu)
 
     @torch.no_grad()
@@ -43,26 +43,27 @@ class PytorchInference(BaseInference):
         if self.fuse:
             model = model.fuse()
         if self.half:
-            model.half()
+            model = model.half()
         model.eval()
         return model
 
-    def preprocess(self):
+    def preprocess(self, image_path: str, *args, **kwargs):
         """
         Preprocesses the input image before performing inference.
         Returns:
             image_data: Preprocessed image data ready for inference.
         """
         # Read the input image using OpenCV
-        image_data = super(PytorchInference, self).preprocess()
-
+        image_data = super(PytorchInference, self).preprocess(image_path)
         image_data = torch.from_numpy(image_data).to(self.device)
         if self.half:
-            image_data = image_data.type(torch.cuda.HalfTensor)
+            image_data = image_data.half()
+        else:
+            image_data = image_data.float()
         return image_data
 
 
-    def main(self):
+    def main(self, image_path: t.Union[str, t.List]):
         """
          Performs inference using a different model or inference engine and returns the dict of output image
 
@@ -70,10 +71,15 @@ class PytorchInference(BaseInference):
             output_img: The output image with drawn detections.
 
         """
-        image = self.preprocess()
-        pred = self.model(image, augment=False, visualize=False)[0]
-        return self.postprocess(resize_shape=image.shape[2:], origin_shape=self.img.shape, pred=pred)
-
+        res = []
+        if isinstance(image_path, str):
+            image_path = [image_path]
+        for path in image_path:
+            image = self.preprocess(path)
+            pred = self.model(image, augment=False, visualize=False)[0]
+            res.append(self.postprocess(resize_shape=image.shape[2:],
+                                        origin_shape=(self.img_height, self.img_width), pred=pred))
+        return res
 
 
     def postprocess(self, resize_shape: t.Tuple, origin_shape: t.Tuple, pred: torch.Tensor):
@@ -102,13 +108,23 @@ class PytorchInference(BaseInference):
         return json.dumps(fake_result, indent=4)
 
 
-if __name__ == '__main__':
-    model_path = r'D:\projects\yolov8\ultralytics\ultralytics\alchemy\dataset_furnace\yolov8n.pt'
-    image_path = r'D:\projects\ultralytics\ultralytics\assets\bus.jpg'
-    obj = PytorchInference(model_path, image_path,
-                           data_classes=r'D:\projects\yolov8\ultralytics\ultralytics\cfg\datasets\coco8.yaml',
-                           half=True, fuse=True, use_gpu=True)
+def main():
+    args = Args()
+    args.set_args()
+    print(args.opts)
+    images_path = os.listdir(args.opts.images_dir)
+    images_path = [os.path.join(args.opts.images_dir, i) for i in images_path]
+    obj = PytorchInference(
+        args.opts.model,
+        data_classes=args.opts.data,
+        half=args.opts.half,
+        fuse=args.opts.fuse,
+        use_gpu=args.opts.use_gpu
+    )
     t1 = time.time()
-    res = obj.main()
+    obj.main(images_path)
     t2 = time.time()
     print(t2 - t1)
+
+if __name__ == '__main__':
+    main()

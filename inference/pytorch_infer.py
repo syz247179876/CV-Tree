@@ -3,7 +3,7 @@ import json
 import os
 import time
 
-
+import numpy as np
 import torch
 import typing as t
 
@@ -47,7 +47,7 @@ class PytorchInference(BaseInference):
         model.eval()
         return model
 
-    def preprocess(self, image_path: str, *args, **kwargs):
+    def preprocess(self, image_path: str, *args, **kwargs) -> t.Union[torch.Tensor, np.ndarray]:
         """
         Preprocesses the input image before performing inference.
         Returns:
@@ -63,12 +63,12 @@ class PytorchInference(BaseInference):
         return image_data
 
 
-    def main(self, image_path: t.Union[str, t.List]):
+    def main(self, image_path: t.Union[str, t.List]) -> t.List:
         """
-         Performs inference using a different model or inference engine and returns the dict of output image
+        Performs inference using a different model or inference engine and returns the list of pred of images
 
         Returns:
-            output_img: The output image with drawn detections.
+        a list, stores the coordinates, confidence, and category of the target box for each predicted image
 
         """
         res = []
@@ -111,18 +111,21 @@ class PytorchInference(BaseInference):
 def main():
     args = Args()
     args.set_args()
+    args.opts.model = r'D:\projects\yolov8\ultralytics\inference\pt_storage\yolov8n.pt'
     print(args.opts)
     images_path = os.listdir(args.opts.images_dir)
     images_path = [os.path.join(args.opts.images_dir, i) for i in images_path]
     obj = PytorchInference(
         args.opts.model,
+        conf_thres=args.opts.conf_thres,
+        iou_thres=args.opts.iou_thres,
         data_classes=args.opts.data,
         half=args.opts.half,
         fuse=args.opts.fuse,
         use_gpu=args.opts.use_gpu
     )
     t1 = time.time()
-    obj.main(images_path)
+    res = obj.main(images_path)
     t2 = time.time()
     print(t2 - t1)
 

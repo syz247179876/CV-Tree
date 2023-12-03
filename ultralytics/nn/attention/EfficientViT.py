@@ -537,7 +537,7 @@ class PatchMerging(nn.Module):
 
         ffn0_hidden_chans = int(hidden_ratio * in_chans)
         ffn1_hidden_chans = int(hidden_ratio * out_chans)
-        hidden_chans = int(hidden_ratio * 4)
+        hidden_chans = int(in_chans * 4)
 
         if act_layer is None:
             act_layer = nn.ReLU
@@ -646,7 +646,6 @@ class EfficientViT(nn.Module):
         # attn_ratio means V is a multiple of Q and K on the channel
         attn_ratios = [embed_dims[i] / (key_dims[i] * num_heads[i]) for i in range(len(embed_dims))]
         # step2: Three EfficientViT and Two EfficientViT Subsample stack
-        self.backbone = []
         self.blocks1 = []
         self.blocks2 = []
         self.blocks3 = []
@@ -676,12 +675,6 @@ class EfficientViT(nn.Module):
         self.blocks2 = nn.Sequential(*self.blocks2)
         self.blocks3 = nn.Sequential(*self.blocks3)
 
-        self.backbone = nn.Sequential(
-            self.patch_embed,
-            self.blocks1,
-            self.blocks2,
-            self.blocks3
-        )
         self.classifier = classifier
 
         if classifier:
@@ -692,7 +685,10 @@ class EfficientViT(nn.Module):
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.backbone(x)
+        x = self.patch_embed(x)
+        x = self.blocks1(x)
+        x = self.blocks2(x)
+        x = self.blocks3(x)
         if self.classifier:
             x = self.classifier_head(x)
         return x

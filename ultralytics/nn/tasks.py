@@ -15,13 +15,16 @@ from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottlenec
                                     PatchMerging, PatchEmbedding, FasterBasicStage, SKBlock, SEBlock, C2fBoT,
                                     MobileViTBlock, MV2Block
                                     )
-from ultralytics.nn.attention import BiLevelRoutingAttention, BiFormerBlock
+from ultralytics.nn.attention import (BiLevelRoutingAttention, BiFormerBlock, EfficientViTBlock, EfficientViTPE,
+                                      EfficientViTPM, EfficientViTPES
+                                      )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8PoseLoss, v8SegmentationLoss
 from ultralytics.utils.plotting import feature_visualization
 from ultralytics.utils.torch_utils import (fuse_conv_and_bn, fuse_deconv_and_bn, initialize_weights, intersect_dicts,
                                            make_divisible, model_info, scale_img, time_sync)
+from ultralytics.utils.act import build_act
 
 try:
     import thop
@@ -244,7 +247,7 @@ class DetectionModel(BaseModel):
         # Build strides
         m = self.model[-1]  # Detect()
         if isinstance(m, (Detect, Segment, Pose)):
-            s = 256  # 2x min stride, 生成model时的大小(还未进入训练), 640
+            s = 640  # 2x min stride, 生成model时的大小(还未进入训练), 640
             m.inplace = self.inplace
             forward = lambda x: self.forward(x)[0] if isinstance(m, (Segment, Pose)) else self.forward(x)
             m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
@@ -685,6 +688,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     if verbose:
         LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
     ch = [ch]
+    resolutions = [d.get('resolution', None)]
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
         m = getattr(torch.nn, m[3:]) if 'nn.' in m else globals()[m]  # get module
@@ -761,6 +765,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         elif m in (CABlock, SEBlock, SKBlock):
             args = [ch[f], ch[f], *args]
             c2 = ch[f]
+
         elif m is FasterNet:
             # process the whole FasterNet
             v = int(d.get('FasterNet_scale')) if d.get('FasterNet_scale') in ['0', '1', '2'] else d.get(
@@ -769,17 +774,48 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                                                            d.get('drop_path_rate')[v], d.get('act_layer')[v]
             args = [ch[f], embed_dim, depths, drop_path_rate, act_layer, *args]
             backbone_ch = [embed_dim * 2 ** i  for i in range(4)]
+
         elif m is BiLevelRoutingAttention:
             args = [ch[f], *args]
+
         elif m is MV2Block:
             c1, c2 = ch[f], args[0]
             args = [c1, c2, *args[1:]]
+
         elif m is MobileViTBlock:
             kernel_size, head_num, mlp_ratio, patch_size, auto_pad = d.get('kernel_size'), d.get('head_num'), \
                                                            d.get('mlp_ratio'), d.get('patch_size'), d.get('auto_pad')
 
             c1, c2, dim, depth = ch[f], args[0], args[1], args[2]
             args = [c1, dim, depth, auto_pad, kernel_size, patch_size, head_num, mlp_ratio, *args[3:]]
+
+        elif m in (EfficientViTPE, EfficientViTPES):
+            act_layer = build_act(d.get('act_layer'))
+            patch_size = d.get('patch_size')
+            resolution = resolutions[args[1]]
+            c1, c2 = ch[f], args[0]
+            args = [c1, c2, resolution, act_layer]
+            resolutions.append(resolution // patch_size)
+
+        elif m is EfficientViTPM:
+            act_layer = build_act(d.get('act_layer'))
+            hidden_ratio = d.get('hidden_ratio')
+            c1, c2 = ch[f], args[0]
+            old_resolution = resolutions[args[1]]
+            new_resolution = (old_resolution - 1) // 2 + 1
+            args = [c1, c2, old_resolution, new_resolution, hidden_ratio, act_layer]
+            resolutions.append(new_resolution)
+
+
+        elif m is EfficientViTBlock:
+            act_layer = build_act(d.get('act_layer'))
+            c1, c2 = ch[f], args[0]
+            kernels = d.get('token_kernels')
+            multi_v = c1 / (args[2] * args[3])
+            resolution = resolutions[args[5]]
+            hidden_ratio = d.get('hidden_ratio')
+            args = [c1, args[1], args[2], args[3], args[4], resolution, kernels, multi_v, hidden_ratio, act_layer]
+            resolutions.append(resolution)
         else:
             c2 = ch[f]
 

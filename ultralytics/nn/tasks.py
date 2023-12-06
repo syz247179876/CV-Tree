@@ -16,7 +16,7 @@ from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottlenec
                                     MobileViTBlock, MV2Block
                                     )
 from ultralytics.nn.attention import (BiLevelRoutingAttention, BiFormerBlock, EfficientViTBlock, EfficientViTPE,
-                                      EfficientViTPM, EfficientViTPES, EfficientViTPESS
+                                      EfficientViTPM, EfficientViTPES, EfficientViTPESS, Conv2dBN
                                       )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -146,6 +146,12 @@ class BaseModel(nn.Module):
                 if isinstance(m, RepConv):
                     m.fuse_convs()
                     m.forward = m.forward_fuse  # update forward
+                # 自定义Conv2dBN融合方式
+                if isinstance(m, Conv2dBN):
+                    m.conv = m.fuse()
+                    m.forward = m.forward_fuse
+                    delattr(m, 'bn')
+                    delattr(m, 'c')
             self.info(verbose=verbose)
 
         return self

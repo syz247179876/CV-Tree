@@ -12,7 +12,7 @@ from ultralytics.nn.modules.utils import auto_pad
 # Official source code: https://github.com/microsoft/Cream/blob/main/EfficientViT/classification/model/efficientvit.py
 
 __all__ = ['efficientvit', 'PatchMerging', 'PatchEmbed', 'EfficientViTBlock', 'EfficientViT', 'PatchEmbedSmall',
-           'PatchEmbedSmaller']
+           'PatchEmbedSmaller', 'Conv2dBN']
 
 
 def drop_path(x: torch.Tensor, drop_prob: float = 0., training: bool = False) -> torch.Tensor:
@@ -81,6 +81,11 @@ class Conv2dBN(torch.nn.Sequential):
         m.weight.data.copy_(w)
         m.bias.data.copy_(b)
         return m
+
+    def forward_fuse(self, x: torch.Tensor):
+        """Apply fused convolution, batch normalization"""
+        return self.conv(x)
+
 
 
 class BNLinear(torch.nn.Sequential):
@@ -367,8 +372,8 @@ class CascadedGroupAttention(nn.Module):
 
         """
         super().train(mode)
-        if mode and hasattr(self, 'ab'):
-            del self.ab
+        if mode and hasattr(self, 'ab_cache'):
+            del self.ab_cache
         else:
             self.ab_cache = self.attention_biases[:, self.attention_bias_idxs]
 

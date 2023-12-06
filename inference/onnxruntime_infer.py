@@ -97,7 +97,7 @@ class ONNXInference(BaseInference):
         input_name = self.model.get_inputs()[0].name
         out_name = self.model.get_outputs()[0].name
         pred = self.model.run([out_name], {input_name: image})
-        pred = torch.from_numpy(np.array(pred[0]))
+        pred = torch.from_numpy(np.array(pred[0])).float()
         return self.postprocess(resize_shape=image.shape[2:], origin_shape=self.img.shape, pred=pred)
 
     def export_fp16(self):
@@ -107,11 +107,11 @@ class ONNXInference(BaseInference):
 
 
 if __name__ == '__main__':
-    model_path = r'D:\projects\yolov8\ultralytics\ultralytics\alchemy\onnx_storage\yolov8n-fp16.onnx'
+    model_path = r'D:\projects\yolov8\ultralytics\ultralytics\alchemy\onnx_storage\yolov8n-ODConv-neck.onnx'
     image_path = r'D:\projects\ultralytics\ultralytics\assets\bus.jpg'
     obj = ONNXInference(model_path, image_path,
                         data_classes=r'D:\projects\yolov8\ultralytics\ultralytics\cfg\datasets\coco8.yaml',
-                        half=True, fuse=True, use_gpu=True)
+                        half=True, fuse=True, use_gpu=False)
     # obj.export_fp16()
     t1 = time.time()
     res = obj.main()

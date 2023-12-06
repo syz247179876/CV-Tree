@@ -1,6 +1,6 @@
 from .BiFormer import BiFormerBlock, BiLevelRoutingAttention
 from .EfficientViT import (EfficientViT, EfficientViTBlock, PatchMerging as EfficientViTPM, PatchEmbed as EfficientViTPE,
-                            PatchEmbedSmall as EfficientViTPES
+                            PatchEmbedSmall as EfficientViTPES, PatchEmbedSmaller as EfficientViTPESS
                            )
 __all__ = [
     # BiFormer
@@ -12,5 +12,7 @@ __all__ = [
     'EfficientViTBlock',
     'EfficientViTPM',
     'EfficientViTPE',
-    'EfficientViTPES'
+    'EfficientViTPES',
+    'EfficientViTPESS',
+
 ]

@@ -212,7 +212,7 @@ class BaseTrainer:
         self.model = self.model.to(self.device)
         self.set_model_attributes()
 
-        # Freeze layers
+        # Freeze layers, 冻结
         freeze_list = self.args.freeze if isinstance(
             self.args.freeze, list) else range(self.args.freeze) if isinstance(self.args.freeze, int) else []
         always_freeze_names = ['.dfl']  # always freeze these layers
@@ -229,7 +229,7 @@ class BaseTrainer:
                             'See ultralytics.engine.trainer for customization of frozen layers.')
                 v.requires_grad = True
         self.freeze_layers_map = freeze_layers_map
-        # Check AMP
+        # Check AMP, 检查是否使用MAP
         self.amp = torch.tensor(self.args.amp).to(self.device)  # True or False
         if self.amp and RANK in (-1, 0):  # Single-GPU and DDP
             callbacks_backup = callbacks.default_callbacks.copy()  # backup callbacks as check_amp() resets them
@@ -253,7 +253,7 @@ class BaseTrainer:
         if self.batch_size == -1 and RANK == -1:  # single-GPU only, estimate best batch size
             self.args.batch = self.batch_size = check_train_batch_size(self.model, self.args.imgsz, self.amp)
 
-        # Dataloaders
+        # Dataloaders, 构建dataloader, dataset
         batch_size = self.batch_size // max(world_size, 1)
         self.train_loader = self.get_dataloader(self.trainset, batch_size=batch_size, rank=RANK, mode='train')
         # 验证集使用训练集的两倍
@@ -266,7 +266,7 @@ class BaseTrainer:
             if self.args.plots:
                 self.plot_training_labels()
 
-        # Optimizer
+        # Optimizer, 构建优化器
         # 优化
         self.accumulate = max(round(self.args.nbs / self.batch_size), 1)  # accumulate loss before optimizing
         weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs  # scale weight_decay

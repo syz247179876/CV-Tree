@@ -16,7 +16,7 @@ from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottlenec
                                     MobileViTBlock, MV2Block
                                     )
 from ultralytics.nn.attention import (BiLevelRoutingAttention, BiFormerBlock, EfficientViTBlock, EfficientViTPE,
-                                      EfficientViTPM, EfficientViTPES
+                                      EfficientViTPM, EfficientViTPES, EfficientViTPESS
                                       )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -789,7 +789,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c1, c2, dim, depth = ch[f], args[0], args[1], args[2]
             args = [c1, dim, depth, auto_pad, kernel_size, patch_size, head_num, mlp_ratio, *args[3:]]
 
-        elif m in (EfficientViTPE, EfficientViTPES):
+        elif m in (EfficientViTPE, EfficientViTPES, EfficientViTPESS):
             act_layer = build_act(d.get('act_layer'))
             patch_size = d.get('patch_size')
             resolution = resolutions[args[1]]

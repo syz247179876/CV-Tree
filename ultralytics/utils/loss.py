@@ -73,7 +73,7 @@ class BboxLoss(nn.Module):
         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
-        # DFL loss
+        # DFL loss, 带权重的交叉熵
         if self.use_dfl:
             target_ltrb = bbox2dist(anchor_points, target_bboxes, self.reg_max)
             loss_dfl = self._df_loss(pred_dist[fg_mask].view(-1, self.reg_max + 1), target_ltrb[fg_mask]) * weight
@@ -130,7 +130,7 @@ class v8DetectionLoss:
         self.device = device
 
         self.use_dfl = m.reg_max > 1
-
+        # TAL
         self.assigner = TaskAlignedAssigner(topk=10, num_classes=self.nc, alpha=0.5, beta=6.0)
         self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=self.use_dfl).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
@@ -149,6 +149,7 @@ class v8DetectionLoss:
                 n = matches.sum()
                 if n:
                     out[j, :n] = targets[matches, 1:]
+            # 反归一化，还原原始目标大小
             out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
         return out
 
@@ -165,33 +166,40 @@ class v8DetectionLoss:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
         loss = torch.zeros(3, device=self.device)  # box, cls, dfl
         feats = preds[1] if isinstance(preds, tuple) else preds
+        # 分成坐标预测和分类预测
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1)
 
+        # (B, anchor_point_num, class_num)
         pred_scores = pred_scores.permute(0, 2, 1).contiguous()
+        # (B, anchor_point_num, 4 * 16)
         pred_distri = pred_distri.permute(0, 2, 1).contiguous()
 
         dtype = pred_scores.dtype
         batch_size = pred_scores.shape[0]
+        # 图像大小
         imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
+        # (anchor_point_num, 2), (anchor_point_num, 1)
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
-        # Targets
+        # Targets, 处理label
         targets = torch.cat((batch['batch_idx'].view(-1, 1), batch['cls'].view(-1, 1), batch['bboxes']), 1)
         targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+        # (B, object_num, 1), (B, object_num, 4)
         gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
+        # 各个坐标点之和要大于0
         mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0)
 
-        # Pboxes
+        # Pboxes, 根据dlf 和pred box解码下采样后的实际坐标
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
-
+        # label assignment
         _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
             pred_scores.detach().sigmoid(), (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
             anchor_points * stride_tensor, gt_labels, gt_bboxes, mask_gt)
 
         target_scores_sum = max(target_scores.sum(), 1)
 
-        # Cls loss
+        # Cls loss, 类别损失采用BCE
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
         loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
 

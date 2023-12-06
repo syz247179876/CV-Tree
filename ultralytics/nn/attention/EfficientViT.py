@@ -11,7 +11,8 @@ from ultralytics.nn.modules.utils import auto_pad
 
 # Official source code: https://github.com/microsoft/Cream/blob/main/EfficientViT/classification/model/efficientvit.py
 
-__all__ = ['efficientvit', 'PatchMerging', 'PatchEmbed', 'EfficientViTBlock', 'EfficientViT', 'PatchEmbedSmall']
+__all__ = ['efficientvit', 'PatchMerging', 'PatchEmbed', 'EfficientViTBlock', 'EfficientViT', 'PatchEmbedSmall',
+           'PatchEmbedSmaller']
 
 
 def drop_path(x: torch.Tensor, drop_prob: float = 0., training: bool = False) -> torch.Tensor:
@@ -210,6 +211,30 @@ class PatchEmbedSmall(nn.Module):
         x = self.patch_embed(x)
         return x
 
+class PatchEmbedSmaller(nn.Module):
+    """
+    Consider smaller object feature
+    """
+
+    def __init__(
+            self,
+            in_chans: int,
+            embed_dim: int,
+            resolution: int,
+            act_layer: t.Optional[t.Callable] = None
+    ):
+        super(PatchEmbedSmaller, self).__init__()
+        if act_layer is None:
+            act_layer = nn.ReLU
+        self.patch_embed = nn.Sequential(
+            Conv2dBN(in_chans, embed_dim // 2, ks=3, stride=2, resolution=resolution),
+            act_layer(inplace=True),
+            Conv2dBN(embed_dim // 2, embed_dim, ks=3, stride=2, resolution=resolution // 2),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.patch_embed(x)
+        return x
 
 class Residual(nn.Module):
     """
@@ -383,6 +408,8 @@ class CascadedGroupAttention(nn.Module):
             else:
                 attn = (q.transpose(-2, -1) @ k) * self.scale
             attn = attn.softmax(dim=-1)
+            if isinstance(v, (torch.HalfTensor, torch.cuda.HalfTensor)):
+                attn = attn.half()
             # (B, v_dim/h, N) @ (B, N, N) ==> (B, v_dim/h, N) ==> (B, v_dim/h, H, W)
             feat = (v @ attn.transpose(-2, -1)).reshape(b, self.v_dim, h, w)
             feature_outs.append(feat)

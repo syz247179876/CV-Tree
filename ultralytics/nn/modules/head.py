@@ -18,7 +18,11 @@ __all__ = 'Detect', 'Segment', 'Pose', 'Classify', 'RTDETRDecoder'
 
 
 class Detect(nn.Module):
-    """YOLOv8 Detect head for detection models."""
+    """
+    YOLOv8 Detect head for detection models.
+    基于TOOD的TAP + TAL
+    """
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
@@ -33,7 +37,9 @@ class Detect(nn.Module):
         self.reg_max = 16  # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
         self.no = nc + self.reg_max * 4  # number of outputs per anchor
         self.stride = torch.zeros(self.nl)  # strides computed during build
+        # 分类头和坐标回归头分开来
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
+        # TAP
         self.cv2 = nn.ModuleList(
             nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch)
         self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
@@ -47,6 +53,7 @@ class Detect(nn.Module):
         if self.training:
             return x
         elif self.dynamic or self.shape != shape:
+            # 以每个像素点的中间作为anchor point
             self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
             self.shape = shape
 

@@ -558,11 +558,11 @@ def infer_on_engine(
         dtype: str = 'fp32',
         fuse: bool = True,
         shape: t.Tuple = (1, 3, 224, 224)
-):
+) -> t.Tuple[t.List, t.List]:
     """
     inference on different engine
     """
-
+    res = None
     if engine == 'pytorch':
         model = rf'{pt_storage}\{model}'
         res = batchmark_common(
@@ -588,10 +588,4 @@ def infer_on_engine(
             dtype=dtype,
         )
 
-
     return res
-
-
-
-
-

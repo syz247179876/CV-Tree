@@ -13,7 +13,7 @@ from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottlenec
                                     Focus, GhostBottleneck, GhostConv, HGBlock, HGStem, Pose, RepC3, RepConv,
                                     RTDETRDecoder, Segment, ConvOD, C2fOD, BottleneckOD, CABlock, FasterNet, C2fFaster,
                                     PatchMerging, PatchEmbedding, FasterBasicStage, SKBlock, SEBlock, C2fBoT,
-                                    MobileViTBlock, MV2Block
+                                    MobileViTBlock, MV2Block, AFPNBlock
                                     )
 from ultralytics.nn.attention import (BiLevelRoutingAttention, BiFormerBlock, EfficientViTBlock, EfficientViTPE,
                                       EfficientViTPM, EfficientViTPES, EfficientViTPESS, Conv2dBN
@@ -82,12 +82,20 @@ class BaseModel(nn.Module):
         for m in self.model:
             # m.f表示yaml中当前模块m的第一个参数, 对于concat表示要连接的某几层数, 对于其他层, 可表示上一层数
             # m.i表示yaml中当前模块m所在层数
-            if m.f != -1:  # if not from previous layer
+
+            # 特殊处理AFPN后的detect
+            if isinstance(m.f, list) and m.f == [-3, -2, -1]:
+                x = y[m.f] if isinstance(m.f, int) else [y[j] for j in m.f]
+            elif m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
+
             if profile:
                 self._profile_one_layer(m, x, dt)
             x = m(x)  # run
-            y.append(x if m.i in self.save else None)  # save output
+            if isinstance(m, AFPNBlock):
+                y.extend([x_ for x_ in x])
+            else:
+                y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
         return x
@@ -675,6 +683,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     import ast
 
     backbone_ch = []
+    fuse_ch = []
     # Args
     max_channels = float('inf')
     nc, act, scales = (d.get(x) for x in ('nc', 'activation', 'scales'))
@@ -822,6 +831,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             hidden_ratio = d.get('hidden_ratio')
             args = [c1, args[1], args[2], args[3], args[4], resolution, kernels, multi_v, hidden_ratio, act_layer]
             resolutions.append(resolution)
+
+        elif m is AFPNBlock:
+            act_layer = build_act(args[0])
+            args = [[ch[x] for x in f], args[1], act_layer]
+            fuse_ch = [ch[x] for x in f]
         else:
             c2 = ch[f]
 
@@ -837,6 +851,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             ch = []
         if m in (FasterNet, ):
             ch.extend(backbone_ch)
+        elif m is AFPNBlock:
+            ch.extend(fuse_ch)
         else:
             ch.append(c2)
     return nn.Sequential(*layers), sorted(save)

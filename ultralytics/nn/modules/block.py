@@ -12,7 +12,7 @@ from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, ConvOD, PartialCo
 from .transformer import TransformerBlock
 __all__ = ('DFL', 'HGBlock', 'HGStem', 'SPP', 'SPPF', 'C1', 'C2', 'C3', 'C2f', 'C2fOD', 'C3x', 'C3TR', 'C3Ghost',
            'GhostBottleneck', 'Bottleneck', 'BottleneckCSP', 'BottleneckOD', 'Proto', 'RepC3', 'CABlock', 'C2fFaster',
-           'SEBlock', 'SKBlock', 'C2fBoT')
+           'SEBlock', 'SKBlock', 'C2fBoT', 'AFPNBlock')
 
 
 class DFL(nn.Module):
@@ -797,3 +797,214 @@ class C2fBoT(C2f):
         super().__init__(c1, c2, n, shortcut, g, e)
         self.m = nn.ModuleList(BoTBottleneck(self.c, self.c, f_size, shortcut, g, k=((3, 3), (3, 3)), e=1.0,
                                              head_num=head_num) for _ in range(n))
+
+class BasicBlock(nn.Module):
+    """
+    BasicBlock with residual
+    """
+
+    def __init__(
+            self,
+            in_chans: int,
+            out_chans: int,
+            stride: int = 1,
+            down_sample: t.Optional[nn.Module] = None,
+            norm_layer: t.Optional[nn.Module] = None,
+            act_layer: t.Optional[nn.Module] = None,
+    ):
+        super(BasicBlock, self).__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        if act_layer is None:
+            act_layer = nn.ReLU
+        # maybe use conv to down sample
+        self.conv1 = nn.Conv2d(in_chans, out_chans, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = norm_layer(out_chans)
+        self.act = act_layer(inplace=True)
+        self.conv2 = nn.Conv2d(out_chans, out_chans, kernel_size=3, padding=1, bias=False)
+        self.bn2 = norm_layer(out_chans)
+
+        self.down_sample = down_sample
+        self.stride = stride
+
+    def forward(self, x: torch.Tensor):
+
+        identity = x
+        y = self.act(self.bn1(self.conv1(x)))
+        y = self.bn2(self.conv2(y))
+
+        if self.down_sample:
+            identity = self.down_sample(identity)
+        y += identity
+        return self.act(y)
+
+
+class ASFFTwo(nn.Module):
+    """
+    Adaptive attention mechanism based on spatial dimension
+
+    Fusion two different layers into one new layers
+    """
+
+    def __init__(
+            self,
+            in_chans: int,
+            act_layer: t.Optional[t.Callable] = None
+    ):
+        super(ASFFTwo, self).__init__()
+
+        if act_layer is None:
+            act_layer = nn.ReLU
+        compress_c = 8
+        self.in_chas = in_chans
+        self.weight_level_1 = Conv(in_chans, compress_c, 1, 1, act=act_layer(inplace=False))
+        self.weight_level_2 = Conv(in_chans, compress_c, 1, 1, act=act_layer(inplace=False))
+
+        # spatial attention
+        self.weight_levels = nn.Conv2d(compress_c * 2, 2, kernel_size=1, stride=1, bias=True)
+        self.softmax = nn.Softmax(dim=1)
+        self.conv = Conv(in_chans, in_chans, 3, 1, act=act_layer(inplace=True))
+
+    def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
+        level_1 = self.weight_level_1(x1)
+        level_2 = self.weight_level_2(x2)
+        levels = torch.cat([level_1, level_2], dim=1)
+        levels_weight = self.weight_levels(levels)
+        levels_weight = self.softmax(levels_weight)
+        # share for all channels
+        fused_out = x1 * levels_weight[:, 0:1, :, :] + x2 * levels_weight[:, 1:2, :, :]
+        out = self.conv(fused_out)
+        return out
+
+
+class ASFFThree(nn.Module):
+    """
+    Adaptive attention mechanism based on spatial dimension
+
+    Fusion three different layers into one new layer
+    """
+
+    def __init__(
+            self,
+            in_chans: int,
+            out_chans: int,
+            act_layer: t.Optional[t.Callable] = None
+    ):
+        super(ASFFThree, self).__init__()
+        if act_layer is None:
+            act_layer = nn.ReLU
+        self.in_chans = in_chans
+        compress_c = 8
+        self.weight_level_1 = Conv(in_chans, compress_c, 1, 1, act=act_layer(inplace=False))
+        self.weight_level_2 = Conv(in_chans, compress_c, 1, 1, act=act_layer(inplace=False))
+        self.weight_level_3 = Conv(in_chans, compress_c, 1, 1, act=act_layer(inplace=False))
+
+        self.weight_levels = nn.Conv2d(compress_c * 3, 3, kernel_size=1, stride=1, bias=True)
+        self.softmax = nn.Softmax(dim=1)
+        self.conv = Conv(in_chans, out_chans, 3, 1, act=act_layer(inplace=True))
+
+    def forward(self, x1: torch.Tensor, x2: torch.Tensor, x3: torch.Tensor) -> torch.Tensor:
+        level_1 = self.weight_level_1(x1)
+        level_2 = self.weight_level_2(x2)
+        level_3 = self.weight_level_3(x3)
+        levels = torch.cat([level_1, level_2, level_3], dim=1)
+        levels_weight = self.weight_levels(levels)
+        levels_weight = self.softmax(levels_weight)
+        # share for all channels
+        fused_out = x1 * levels_weight[:, 0:1, :, :] + x2 * levels_weight[:, 1:2, :, :] + x3 * levels_weight[:, 2:3, :,
+                                                                                               :]
+        fused_out = self.conv(fused_out)
+        return fused_out
+
+
+class AFPNUpsample(nn.Module):
+    """
+    the upsample in AFPN
+    """
+
+    def __init__(
+            self,
+            in_chans: int,
+            out_chans: int,
+            act_layer: t.Callable,
+            scale_factor: int = 2,
+            mode: str = 'bilinear',
+    ):
+        super(AFPNUpsample, self).__init__()
+        self.upsample = nn.Sequential(
+            Conv(in_chans, out_chans, act=act_layer(inplace=False)),
+            nn.Upsample(scale_factor=scale_factor, mode=mode),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.upsample(x)
+        return x
+
+
+class AFPNBlock(nn.Module):
+    """
+    Asymptotic Feature Pyramid Network (AFPN)
+    AFPN Block, it adopts cross layer progressive fusion and adaptive space-wise attention mechanism (ASFF)
+    """
+
+    def __init__(
+            self,
+            channels: t.Union[t.List, t.Tuple],
+            width: float = 1.0,
+            act_layer: t.Optional[t.Callable] = None
+    ):
+        """
+        Args:
+            channels: the number of channels for different layers used for fusion
+            width: width param used to implement models at different scales in the channel dimension
+            act_layer: activate layers
+        """
+        super(AFPNBlock, self).__init__()
+        if act_layer is None:
+            act_layer = nn.ReLU
+
+        # The semantic degree, from low to high, is 0, 1, and 2, corresponding to top, mid and bottom
+
+        # fuse low and mid semantics layers, 0_0_1 means first fuse, from 0 layer to 1 layer
+        self.down_sample_1_0_1 = Conv(channels[0], channels[1], 2, 2, p=0, act=act_layer(inplace=True))
+        self.up_sample_1_1_0 = AFPNUpsample(channels[1], channels[0], act_layer=act_layer)
+        # 1_0 means first fuse, fused layer is 0 layer
+        self.asff_top1_0 = ASFFTwo(in_chans=channels[0])
+        self.asff_mid1_1 = ASFFTwo(in_chans=channels[1])
+
+        # fuse low, mid, high semantics layers, 2_0_1 means second fuse, from 0 layer to 1 layer
+        self.down_sample_2_0_1 = Conv(channels[0], channels[1], 2, 2, p=0, act=act_layer(inplace=False))
+        self.down_sample_2_0_2 = Conv(channels[0], channels[2], 4, 4, p=0, act=act_layer(inplace=False))
+        self.down_sample_2_1_2 = Conv(channels[1], channels[2], 2, 2, p=0, act=act_layer(inplace=False))
+        self.up_sample_2_1_0 = AFPNUpsample(channels[1], channels[0], act_layer=act_layer, scale_factor=2,
+                                            mode='bilinear')
+        self.up_sample_2_2_0 = AFPNUpsample(channels[2], channels[0], act_layer=act_layer, scale_factor=4,
+                                            mode='bilinear')
+        self.up_sample_2_2_1 = AFPNUpsample(channels[2], channels[1], act_layer=act_layer, scale_factor=2,
+                                            mode='bilinear')
+
+        # 2_0 means second fuse, fused layer is 1 layer
+        self.asff_top2_0 = ASFFThree(in_chans=channels[0], out_chans=int(channels[0] * width))
+        self.asff_mid2_1 = ASFFThree(in_chans=channels[1], out_chans=int(channels[1] * width))
+        self.asff_bottom2_2 = ASFFThree(in_chans=channels[2], out_chans=int(channels[2] * width))
+
+
+
+    def forward(self, x: t.Union[t.List[torch.Tensor], t.Tuple[torch.Tensor]]) -> t.Tuple[torch.Tensor, ...]:
+        x0, x1, x2 = x
+
+        x1_0 = self.asff_top1_0(x0, self.up_sample_1_1_0(x1))
+        x1_1 = self.asff_mid1_1(self.down_sample_1_0_1(x0), x1)
+
+        # TODO: Increase the connection between different scales in convolutional modeling, such as C3, C2f...
+        x2_0 = self.asff_top2_0(x1_0, self.up_sample_2_1_0(x1_1), self.up_sample_2_2_0(x2))
+        x2_1 = self.asff_mid2_1(self.down_sample_2_0_1(x1_0), x1_1, self.up_sample_2_2_1(x2))
+        x2_2 = self.asff_bottom2_2(self.down_sample_2_0_2(x1_0), self.down_sample_2_1_2(x1_1), x2)
+
+        return x2_0, x2_1, x2_2
+
+
+    
+    
+    
+

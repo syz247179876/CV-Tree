@@ -12,7 +12,7 @@ from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, ConvOD, PartialCo
 from .transformer import TransformerBlock
 __all__ = ('DFL', 'HGBlock', 'HGStem', 'SPP', 'SPPF', 'C1', 'C2', 'C3', 'C2f', 'C2fOD', 'C3x', 'C3TR', 'C3Ghost',
            'GhostBottleneck', 'Bottleneck', 'BottleneckCSP', 'BottleneckOD', 'Proto', 'RepC3', 'CABlock', 'C2fFaster',
-           'SEBlock', 'SKBlock', 'C2fBoT', 'AFPNBlock')
+           'SEBlock', 'SKBlock', 'C2fBoT', 'AFPNC2f')
 
 
 class DFL(nn.Module):
@@ -863,7 +863,7 @@ class ASFFTwo(nn.Module):
         # spatial attention
         self.weight_levels = nn.Conv2d(compress_c * 2, 2, kernel_size=1, stride=1, bias=True)
         self.softmax = nn.Softmax(dim=1)
-        self.conv = Conv(in_chans, in_chans, 3, 1, act=act_layer(inplace=True))
+        self.conv = Conv(in_chans, in_chans, 1, 1, act=act_layer(inplace=True))
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
         level_1 = self.weight_level_1(x1)
@@ -873,8 +873,8 @@ class ASFFTwo(nn.Module):
         levels_weight = self.softmax(levels_weight)
         # share for all channels
         fused_out = x1 * levels_weight[:, 0:1, :, :] + x2 * levels_weight[:, 1:2, :, :]
-        out = self.conv(fused_out)
-        return out
+        fused_out = self.conv(fused_out)
+        return fused_out
 
 
 class ASFFThree(nn.Module):
@@ -901,7 +901,7 @@ class ASFFThree(nn.Module):
 
         self.weight_levels = nn.Conv2d(compress_c * 3, 3, kernel_size=1, stride=1, bias=True)
         self.softmax = nn.Softmax(dim=1)
-        self.conv = Conv(in_chans, out_chans, 3, 1, act=act_layer(inplace=True))
+        self.conv = Conv(in_chans, out_chans, 1, 1, act=act_layer(inplace=True))
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor, x3: torch.Tensor) -> torch.Tensor:
         level_1 = self.weight_level_1(x1)
@@ -941,9 +941,9 @@ class AFPNUpsample(nn.Module):
         return x
 
 
-class AFPNBlock(nn.Module):
+class AFPNC2f(nn.Module):
     """
-    Asymptotic Feature Pyramid Network (AFPN)
+    Asymptotic Feature Pyramid Network (AFPN) + C2f
     AFPN Block, it adopts cross layer progressive fusion and adaptive space-wise attention mechanism (ASFF)
     """
 
@@ -951,7 +951,8 @@ class AFPNBlock(nn.Module):
             self,
             channels: t.Union[t.List, t.Tuple],
             width: float = 1.0,
-            act_layer: t.Optional[t.Callable] = None
+            act_layer: t.Optional[t.Callable] = None,
+            c2f_num: int = 3,
     ):
         """
         Args:
@@ -959,20 +960,23 @@ class AFPNBlock(nn.Module):
             width: width param used to implement models at different scales in the channel dimension
             act_layer: activate layers
         """
-        super(AFPNBlock, self).__init__()
+        super(AFPNC2f, self).__init__()
         if act_layer is None:
             act_layer = nn.ReLU
 
         # The semantic degree, from low to high, is 0, 1, and 2, corresponding to top, mid and bottom
 
-        # fuse low and mid semantics layers, 0_0_1 means first fuse, from 0 layer to 1 layer
+        # dimensional alignment, fuse low and mid semantics layers, 0_0_1 means first fuse, from 0 layer to 1 layer
         self.down_sample_1_0_1 = Conv(channels[0], channels[1], 2, 2, p=0, act=act_layer(inplace=True))
         self.up_sample_1_1_0 = AFPNUpsample(channels[1], channels[0], act_layer=act_layer)
         # 1_0 means first fuse, fused layer is 0 layer
         self.asff_top1_0 = ASFFTwo(in_chans=channels[0])
         self.asff_mid1_1 = ASFFTwo(in_chans=channels[1])
 
-        # fuse low, mid, high semantics layers, 2_0_1 means second fuse, from 0 layer to 1 layer
+        self.c2f1_0 = C2f(channels[0], channels[0], c2f_num)
+        self.c2f1_1 = C2f(channels[1], channels[1], c2f_num)
+
+        # dimensional alignment, fuse low, mid, high semantics layers, 2_0_1 means second fuse, from 0 layer to 1 layer
         self.down_sample_2_0_1 = Conv(channels[0], channels[1], 2, 2, p=0, act=act_layer(inplace=False))
         self.down_sample_2_0_2 = Conv(channels[0], channels[2], 4, 4, p=0, act=act_layer(inplace=False))
         self.down_sample_2_1_2 = Conv(channels[1], channels[2], 2, 2, p=0, act=act_layer(inplace=False))
@@ -987,7 +991,9 @@ class AFPNBlock(nn.Module):
         self.asff_top2_0 = ASFFThree(in_chans=channels[0], out_chans=int(channels[0] * width))
         self.asff_mid2_1 = ASFFThree(in_chans=channels[1], out_chans=int(channels[1] * width))
         self.asff_bottom2_2 = ASFFThree(in_chans=channels[2], out_chans=int(channels[2] * width))
-
+        self.c2f2_0 = C2f(channels[0], channels[0], c2f_num)
+        self.c2f2_1 = C2f(channels[1], channels[1], c2f_num)
+        self.c2f2_2 = C2f(channels[2], channels[2], c2f_num)
 
 
     def forward(self, x: t.Union[t.List[torch.Tensor], t.Tuple[torch.Tensor]]) -> t.Tuple[torch.Tensor, ...]:
@@ -996,10 +1002,16 @@ class AFPNBlock(nn.Module):
         x1_0 = self.asff_top1_0(x0, self.up_sample_1_1_0(x1))
         x1_1 = self.asff_mid1_1(self.down_sample_1_0_1(x0), x1)
 
-        # TODO: Increase the connection between different scales in convolutional modeling, such as C3, C2f...
+        x1_0 = self.c2f1_0(x1_0)
+        x1_1 = self.c2f1_1(x1_1)
+
         x2_0 = self.asff_top2_0(x1_0, self.up_sample_2_1_0(x1_1), self.up_sample_2_2_0(x2))
         x2_1 = self.asff_mid2_1(self.down_sample_2_0_1(x1_0), x1_1, self.up_sample_2_2_1(x2))
         x2_2 = self.asff_bottom2_2(self.down_sample_2_0_2(x1_0), self.down_sample_2_1_2(x1_1), x2)
+
+        x2_0 = self.c2f2_0(x2_0)
+        x2_1 = self.c2f2_1(x2_1)
+        x2_2 = self.c2f2_2(x2_2)
 
         return x2_0, x2_1, x2_2
 

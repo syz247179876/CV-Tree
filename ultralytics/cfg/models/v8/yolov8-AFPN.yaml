@@ -28,6 +28,6 @@ backbone:
 
 # YOLOv8.0n head
 head:
-  - [[4, 6, 9], 1, AFPNBlock, ['silu', 1.0]]
+  - [[4, 6, 9], 1, AFPNC2f, [1.0, 'silu', 3]]
   # 解耦头
   - [[-3, -2, -1], 1, Detect, [nc]]  # Detect(P3, P4, P5)

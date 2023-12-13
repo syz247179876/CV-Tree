@@ -13,7 +13,7 @@ from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottlenec
                                     Focus, GhostBottleneck, GhostConv, HGBlock, HGStem, Pose, RepC3, RepConv,
                                     RTDETRDecoder, Segment, ConvOD, C2fOD, BottleneckOD, CABlock, FasterNet, C2fFaster,
                                     PatchMerging, PatchEmbedding, FasterBasicStage, SKBlock, SEBlock, C2fBoT,
-                                    MobileViTBlock, MV2Block, AFPNBlock
+                                    MobileViTBlock, MV2Block, AFPNC2f
                                     )
 from ultralytics.nn.attention import (BiLevelRoutingAttention, BiFormerBlock, EfficientViTBlock, EfficientViTPE,
                                       EfficientViTPM, EfficientViTPES, EfficientViTPESS, Conv2dBN
@@ -92,7 +92,7 @@ class BaseModel(nn.Module):
             if profile:
                 self._profile_one_layer(m, x, dt)
             x = m(x)  # run
-            if isinstance(m, AFPNBlock):
+            if isinstance(m, AFPNC2f):
                 y.extend([x_ for x_ in x])
             else:
                 y.append(x if m.i in self.save else None)  # save output
@@ -832,9 +832,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c1, args[1], args[2], args[3], args[4], resolution, kernels, multi_v, hidden_ratio, act_layer]
             resolutions.append(resolution)
 
-        elif m is AFPNBlock:
-            act_layer = build_act(args[0])
-            args = [[ch[x] for x in f], args[1], act_layer]
+        elif m is AFPNC2f:
+            act_layer = build_act(args[1])
+            args = [[ch[x] for x in f], args[0], act_layer, args[2]]
             fuse_ch = [ch[x] for x in f]
         else:
             c2 = ch[f]
@@ -851,7 +851,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             ch = []
         if m in (FasterNet, ):
             ch.extend(backbone_ch)
-        elif m is AFPNBlock:
+        elif m is AFPNC2f:
             ch.extend(fuse_ch)
         else:
             ch.append(c2)

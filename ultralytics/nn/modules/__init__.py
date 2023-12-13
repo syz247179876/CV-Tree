@@ -19,7 +19,7 @@ Example:
 
 from .block import (C1, C2, C3, C3TR, DFL, SPP, SPPF, Bottleneck, BottleneckCSP, C2f, C3Ghost, C3x, GhostBottleneck,
                     HGBlock, HGStem, Proto, RepC3, C2fOD, BottleneckOD, CABlock, C2fFaster, SEBlock, SKBlock, C2fBoT,
-                    AFPNBlock,)
+                    AFPNC2f,)
 from .conv import (CBAM, ChannelAttention, Concat, Conv, Conv2, ConvTranspose, DWConv, DWConvTranspose2d, Focus,
                    GhostConv, LightConv, RepConv, SpatialAttention, ConvOD, ODConv, PartialConv)
 from .head import Classify, Detect, Pose, RTDETRDecoder, Segment
@@ -36,5 +36,5 @@ __all__ = ('Conv', 'Conv2', 'LightConv', 'RepConv', 'DWConv', 'DWConvTranspose2d
            'DeformableTransformerDecoder', 'DeformableTransformerDecoderLayer', 'MSDeformAttn', 'MLP',
            'ConvOD', 'ODConv', 'C2fOD', 'BottleneckOD', 'CABlock', 'FasterNet', 'C2fFaster',
            'FasterNetBlock', 'PatchEmbedding', 'PatchMerging', 'FasterBasicStage', 'SKBlock', 'SEBlock', 'C2fBoT',
-           'MobileViTBlock', 'MV2Block', 'AFPNBlock'
+           'MobileViTBlock', 'MV2Block', 'AFPNC2f'
            )

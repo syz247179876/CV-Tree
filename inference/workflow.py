@@ -5,7 +5,8 @@ import os
 
 import torch.nn as nn
 import argparse
-from utils import check_inference_result, export_onnx, export_engine, infer_on_engine
+from utils import check_inference_result, export_onnx, export_engine, infer_on_engine, \
+    onnx_storage, pt_storage, trt_storage
 
 analysis_storage = rf'{os.path.dirname(__file__)}\analysis'
 
@@ -92,6 +93,15 @@ class WorkFlow(nn.Module):
     """
 
     def __init__(self, opts: argparse.Namespace):
+        if not os.path.exists(onnx_storage):
+            os.mkdir(onnx_storage)
+        if not os.path.exists(pt_storage):
+            os.mkdir(pt_storage)
+        if not os.path.exists(trt_storage):
+            os.mkdir(trt_storage)
+        if not os.path.exists(analysis_storage):
+            os.mkdir(analysis_storage)
+
         save_path = rf'{analysis_storage}\{opts.analysis_name}'
         super(WorkFlow, self).__init__()
         self.opts = opts

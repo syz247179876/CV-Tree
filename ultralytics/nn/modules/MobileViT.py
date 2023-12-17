@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import typing as t
 import torch.nn.functional as F
+from ultralytics.nn.modules import Conv
 from einops import rearrange
 
 
@@ -45,33 +46,33 @@ class DropPath(nn.Module):
         return drop_path(x, self.drop_prob, self.training)
 
 
-class Conv(nn.Module):
-    """
-    Basic Conv includes Conv2d(1x1 or 3x3), BN, Relu
-    """
-
-    def __init__(
-            self,
-            in_chans: int,
-            out_chans: int,
-            kernel_size: int = 3,
-            stride: int = 1,
-            groups: int = 1,
-            norm_layer: t.Optional[t.Callable] = None,
-            act_layer: t.Optional[t.Callable] = None,
-    ):
-        super(Conv, self).__init__()
-        if norm_layer is None:
-            norm_layer = nn.BatchNorm2d
-        if act_layer is None:
-            act_layer = nn.ReLU
-        self.conv = nn.Conv2d(in_chans, out_chans, kernel_size, stride,
-                              padding=1 if kernel_size == 3 else 0, groups=groups, bias=False)
-        self.bn = norm_layer(out_chans)
-        self.act = act_layer(inplace=True)
-
-    def forward(self, x: torch.Tensor):
-        return self.act(self.bn(self.conv(x)))
+# class Conv(nn.Module):
+#     """
+#     Basic Conv includes Conv2d(1x1 or 3x3), BN, Relu
+#     """
+#
+#     def __init__(
+#             self,
+#             in_chans: int,
+#             out_chans: int,
+#             kernel_size: int = 3,
+#             stride: int = 1,
+#             groups: int = 1,
+#             norm_layer: t.Optional[t.Callable] = None,
+#             act_layer: t.Optional[t.Callable] = None,
+#     ):
+#         super(Conv, self).__init__()
+#         if norm_layer is None:
+#             norm_layer = nn.BatchNorm2d
+#         if act_layer is None:
+#             act_layer = nn.ReLU
+#         self.conv = nn.Conv2d(in_chans, out_chans, kernel_size, stride,
+#                               padding=1 if kernel_size == 3 else 0, groups=groups, bias=False)
+#         self.bn = norm_layer(out_chans)
+#         self.act = act_layer(inplace=True)
+#
+#     def forward(self, x: torch.Tensor):
+#         return self.act(self.bn(self.conv(x)))
 
 
 class MLP(nn.Module):
@@ -220,15 +221,15 @@ class MobileViTBlock(nn.Module):
         # use to learn local representation
         self.auto_pad = auto_pad
         self.ph, self.pw = patch_size, patch_size
-        self.conv1 = Conv(channel, channel, kernel_size=kernel_size, act_layer=nn.SiLU)
-        self.conv2 = Conv(channel, dim, kernel_size=1, act_layer=nn.SiLU)
+        self.conv1 = Conv(channel, channel, k=kernel_size)
+        self.conv2 = Conv(channel, dim, k=1)
         self.transformers = nn.ModuleList([
             Transformer(dim, patch_size, num_head, qk_bias, qk_scale, attn_drop_ratio, proj_drop_ratio,
                         drop_path_ratio, mlp_ratio)
             for _ in range(depth)
         ])
-        self.conv3 = Conv(dim, channel, kernel_size=1, act_layer=nn.SiLU)
-        self.conv4 = Conv(2 * channel, channel, kernel_size=kernel_size, act_layer=nn.SiLU)
+        self.conv3 = Conv(dim, channel, k=1)
+        self.conv4 = Conv(2 * channel, channel, k=kernel_size)
 
     def forward(self, x: torch.Tensor):
         # used in validation
@@ -276,35 +277,44 @@ class MV2Block(nn.Module):
             self,
             in_chans: int,
             out_chans: int,
-            stride: int,
+            n: int = 1,
+            stride: int = 1,
             expand_t: int = 6,
+
     ):
         super().__init__()
         hidden_chans = int(in_chans * expand_t)
         self.shortcut = stride == 1 and in_chans == out_chans
-
-        if expand_t == 1:
-            self.mv2 = nn.Sequential(*(
-                Conv(hidden_chans, hidden_chans, 3, stride, groups=hidden_chans, act_layer=nn.SiLU),
-                nn.Conv2d(hidden_chans, out_chans, 1, bias=False),
-                nn.BatchNorm2d(out_chans)
-            ))
-        else:
-            self.mv2 = nn.Sequential(*(
-                Conv(in_chans, hidden_chans, 1, act_layer=nn.SiLU),
-                Conv(hidden_chans, hidden_chans, 3, stride, groups=hidden_chans, act_layer=nn.SiLU),
-                nn.Conv2d(hidden_chans, out_chans, 1, bias=False),
-                nn.BatchNorm2d(out_chans)
-            ))
+        blocks = []
+        for i in range(n):
+            if expand_t == 1:
+                blocks.append(nn.Sequential(*(
+                    Conv(hidden_chans, hidden_chans, 3, stride if i == 0 else 1, g=hidden_chans),
+                    nn.Conv2d(hidden_chans, out_chans, 1, bias=False),
+                    nn.BatchNorm2d(out_chans)
+                )))
+                hidden_chans = out_chans
+            else:
+                blocks.append(nn.Sequential(*(
+                    Conv(in_chans, hidden_chans, 1),
+                    Conv(hidden_chans, hidden_chans, 3, stride if i == 0 else 1, g=hidden_chans),
+                    nn.Conv2d(hidden_chans, out_chans, 1, bias=False),
+                    nn.BatchNorm2d(out_chans)
+                )))
+                in_chans = out_chans
+        self.blocks = nn.Sequential(*blocks)
 
     def forward(self, x: torch.Tensor):
         if self.shortcut:
-            return x + self.mv2(x)
+            return x + self.blocks(x)
         else:
-            return self.mv2(x)
+            return self.blocks(x)
 
 
 # if __name__ == '__main__':
-#     _x = torch.randn((2, 64, 80, 80))
-#     model = MobileViTBlock(64, 64, 3, 1)
+#     _x = torch.randn((2, 64, 80, 80)).to(0)
+#     model = MV2Block(64, 64, 3, 2, 6).to(0)
 #     model(_x)
+#     print(model)
+#     from torchsummary import summary
+#     summary(model, (64, 80, 80), batch_size=2)

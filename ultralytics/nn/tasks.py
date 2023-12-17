@@ -707,6 +707,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
         m = getattr(torch.nn, m[3:]) if 'nn.' in m else globals()[m]  # get module
+        temp_n = n
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
@@ -721,7 +722,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
 
             args = [c1, c2, *args[1:]]
-            if m in (BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, C3x, RepC3, C2fFaster, C2fBoT, C2fOD,
+            if m in (BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, C3x, RepC3, C2fFaster, C2fBoT, C2fOD
                      ):
                 args.insert(2, n)  # number of repeats
                 n = 1
@@ -794,15 +795,17 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [ch[f], *args]
 
         elif m is MV2Block:
-            c1, c2 = ch[f], args[0]
-            args = [c1, c2, *args[1:]]
+            width_m = d.get('width_m')
+            c1, c2 = ch[f], make_divisible(args[0] * width_m, 8)
+            args = [c1, c2, temp_n, *args[1:]]
+            n = 1
 
         elif m is MobileViTBlock:
             kernel_size, head_num, mlp_ratio, patch_size, auto_pad = d.get('kernel_size'), d.get('head_num'), \
                                                            d.get('mlp_ratio'), d.get('patch_size'), d.get('auto_pad')
 
-            c1, c2, dim, depth = ch[f], args[0], args[1], args[2]
-            args = [c1, dim, depth, auto_pad, kernel_size, patch_size, head_num, mlp_ratio, *args[3:]]
+            c1, c2, dim, depth_ = ch[f], args[0], args[1], args[2]
+            args = [c1, dim, depth_, auto_pad, kernel_size, patch_size, head_num, mlp_ratio, *args[3:]]
 
         elif m in (EfficientViTPE, EfficientViTPES, EfficientViTPESS):
             act_layer = build_act(d.get('act_layer'))
@@ -836,6 +839,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             act_layer = build_act(args[1])
             args = [[ch[x] for x in f], args[0], act_layer, args[2]]
             fuse_ch = [ch[x] for x in f]
+
         else:
             c2 = ch[f]
 

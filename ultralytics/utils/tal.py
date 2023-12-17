@@ -181,7 +181,7 @@ class TaskAlignedAssigner(nn.Module):
         ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj
         ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj
         # Get the scores of each grid for each gt cls, 获取对于每一类来说，每一个grid的cls分数,
-        # 识gt候选cell的得分，首先针对每一个gt，根据其lebel，获取对应所有cell的得分，然后通过mask_gt进行索引，得到每一个gt候选cell的得分
+        # 识gt候选cell的得分，首先针对每一个gt，根据其label，获取对应所有cell的得分，然后通过mask_gt进行索引，得到每一个gt候选cell的得分
         # 类似gather操作, TODO: 这块的具体逻辑还没搞懂
         bbox_scores[mask_gt] = pd_scores[ind[0], :, ind[1]][mask_gt]  # b, max_num_obj, h*w
 

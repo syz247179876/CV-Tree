@@ -14,4 +14,4 @@ def get_model(model: str, device: str = 'cuda'):
 
 if __name__ == '__main__':
     model = get_model('yolov8-MobileNetV2.yaml')
-    model.train(data=DATASET_EXDARK, epochs=300, batch=64, lr0=0.02, name=f'train-{DATASET_EXDARK}-MobileNetV2-1.0')
+    model.train(data=DATASET_EXDARK, epochs=300, batch=32, lr0=0.01, name=f'train-{DATASET_EXDARK}-MobileNetV2-1.0')

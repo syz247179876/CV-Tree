@@ -24,8 +24,8 @@ def log_profile(mode: str, shape: t.Tuple = (3, 640, 640), batch_size: int = 1):
 
             if mode == 'thop':
                 flops, params = profile(m, (x,))
-                print("FLOPs=", str(flops / 1e9) + '{}'.format("G"))
-                print("params=", str(params / 1e6) + '{}'.format("M"))
+                print(f"FLOPs={str(flops / 1e9)}G")
+                print(f"params={str(params / 1e6)}M")
             if mode == 'torchsummary':
                 summary(m, shape, batch_size=batch_size, device=device)
             return model

@@ -1,5 +1,8 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
-# YOLOv8-pose-p6 keypoints/pose estimation model. For Usage examples see https://docs.ultralytics.com/tasks/pose
+# YOLOv8 object detection model with P3-P5 outputs. For Usage examples see https://docs.ultralytics.com/tasks/detect
+
+# Whether to enable performance analysis for each layer of the model
+profile: true
 
 # Parameters
 nc: 1  # number of classes

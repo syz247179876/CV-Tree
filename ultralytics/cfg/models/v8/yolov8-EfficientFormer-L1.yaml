@@ -1,3 +1,9 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+# YOLOv8 object detection model with P3-P5 outputs. For Usage examples see https://docs.ultralytics.com/tasks/detect
+
+# Whether to enable performance analysis for each layer of the model
+profile: true
+
 # Parameters
 nc: 80  # number of classes
 scales: # model compound scaling constants, i.e. 'model=yolov8n.yaml' will call yolov8.yaml with scale 'n'
@@ -59,7 +65,6 @@ norm_layer: 'ln'
 
 # used in MB3D/MB4D
 act_layer: 'gelu'
-
 
 # EfficientFormer backbone
 backbone:

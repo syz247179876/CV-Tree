@@ -16,11 +16,13 @@ from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottlenec
                                     MobileViTBlock, MV2Block, AFPNC2f
                                     )
 from ultralytics.nn.attention import (BiLevelRoutingAttention, BiFormerBlock, EfficientViTBlock, EfficientViTPE,
-                                      EfficientViTPM, EfficientViTPES, EfficientViTPESS, Conv2dBN
+                                      EfficientViTPM, EfficientViTPES, EfficientViTPESS, EfficientViTCB,
+                                      EfficientFormerStem, EFMetaBlock, EfficientFormerPM, EfficientFormerCB,
                                       )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8PoseLoss, v8SegmentationLoss
+from ultralytics.utils.norm import build_norm
 from ultralytics.utils.plotting import feature_visualization
 from ultralytics.utils.torch_utils import (fuse_conv_and_bn, fuse_deconv_and_bn, initialize_weights, intersect_dicts,
                                            make_divisible, model_info, scale_img, time_sync)
@@ -155,7 +157,7 @@ class BaseModel(nn.Module):
                     m.fuse_convs()
                     m.forward = m.forward_fuse  # update forward
                 # 自定义Conv2dBN融合方式
-                if isinstance(m, Conv2dBN):
+                if isinstance(m, (EfficientViTCB, EfficientFormerCB)):
                     m.conv = m.fuse()
                     m.forward = m.forward_fuse
                     delattr(m, 'bn')
@@ -257,13 +259,13 @@ class DetectionModel(BaseModel):
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
         self.names = {i: f'{i}' for i in range(self.yaml['nc'])}  # default names dict
         self.inplace = self.yaml.get('inplace', True)
-
+        self.profile = cfg.get('profile', False)
         # Build strides
         m = self.model[-1]  # Detect()
         if isinstance(m, (Detect, Segment, Pose)):
             s = 640  # 2x min stride, 生成model时的大小(还未进入训练), 640
             m.inplace = self.inplace
-            forward = lambda x: self.forward(x)[0] if isinstance(m, (Segment, Pose)) else self.forward(x)
+            forward = lambda x: self.forward(x, profile=self.profile)[0] if isinstance(m, (Segment, Pose)) else self.forward(x, profile=self.profile)
             m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
             self.stride = m.stride
             m.bias_init()  # only run once
@@ -839,6 +841,34 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             act_layer = build_act(args[1])
             args = [[ch[x] for x in f], args[0], act_layer, args[2]]
             fuse_ch = [ch[x] for x in f]
+
+        elif m is EfficientFormerStem:
+            c1, c2 = ch[f], args[0]
+            args = [c1, c2]
+
+        elif m is EfficientFormerPM:
+            c1, c2 = ch[f], args[0]
+            down_patch_size = d.get('down_patch_size')
+            down_stride = d.get('down_stride')
+            args = [c1, c2, down_patch_size, down_stride]
+
+        elif m is EFMetaBlock:
+            c1, c2 = ch[f], ch[f]
+            depths = d.get('depths')
+            multi_v = d.get('multi_v', 4.)
+            num_head = d.get('num_head', 8)
+            q_k_dim = d.get('q_k_dim', 32)
+            pool_size = d.get('pool_size', 3)
+            mlp_ratio = d.get('mlp_ratio', 4.)
+            act_layer = build_act(d.get('act_layer'))
+            norm_layer = build_norm(d.get('norm_layer'))
+            drop_ratio = d.get('drop_ratio', 0.)
+            drop_path_ratio = d.get('drop_path_ratio', 0.)
+            use_layer_scale = d.get('use_layer_scale', True),
+            layer_scale_init_value = eval(d.get('layer_scale_init_value', '1e-5'))
+            vit_num = d.get('vit_num')
+            args = [c1, args[0], depths, multi_v, num_head, q_k_dim, pool_size, mlp_ratio, act_layer, norm_layer,
+                    drop_ratio, drop_path_ratio, use_layer_scale, layer_scale_init_value, vit_num]
 
         else:
             c2 = ch[f]

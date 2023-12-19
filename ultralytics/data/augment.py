@@ -166,7 +166,10 @@ class Mosaic(BaseMixTransform):
         return self._mosaic4(labels) if self.n == 4 else self._mosaic9(labels)
 
     def _mosaic4(self, labels):
-        """Create a 2x2 image mosaic."""
+        """
+        Create a 2x2 image mosaic.
+        整体图像尺寸翻倍, 用于在一张图像上存储4张图像
+        """
         mosaic_labels = []
         s = self.imgsz
         yc, xc = (int(random.uniform(-x, 2 * s + x)) for x in self.border)  # mosaic center x, y
@@ -324,7 +327,7 @@ class RandomPerspective:
         apply_keypoints(keypoints, M): Transforms keypoints.
         __call__(labels): Main method to apply transformations to both images and their corresponding annotations.
         box_candidates(box1, box2): Filters out bounding boxes that don't meet certain criteria post-transformation.
-    随机透视和仿射变换
+    随机透视和仿射变换, 包含旋转，平移，缩放，剪切
     """
 
     def __init__(self,

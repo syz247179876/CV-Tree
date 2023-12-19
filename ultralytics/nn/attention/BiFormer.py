@@ -347,7 +347,7 @@ class BiFormerBlock(nn.Module):
                                                 side_dwconv=side_dwconv,
                                                 auto_pad=auto_pad)
         elif topk == 0:
-            self.attn = nn.Sequential(rearrange('n h w c -> n c h w'),  # compatiability
+            self.attn = nn.Sequential(Rearrange('n h w c -> n c h w'),  # compatiability
                                       nn.Conv2d(dim, dim, 1),  # pseudo qkv linear
                                       nn.Conv2d(dim, dim, 5, padding=2, groups=dim),  # pseudo attention
                                       nn.Conv2d(dim, dim, 1),  # pseudo out linear

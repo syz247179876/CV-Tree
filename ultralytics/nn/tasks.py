@@ -13,7 +13,8 @@ from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottlenec
                                     Focus, GhostBottleneck, GhostConv, HGBlock, HGStem, Pose, RepC3, RepConv,
                                     RTDETRDecoder, Segment, ConvOD, C2fOD, BottleneckOD, CABlock, FasterNet, C2fFaster,
                                     PatchMerging, PatchEmbedding, FasterBasicStage, SKBlock, SEBlock, C2fBoT,
-                                    MobileViTBlock, MV2Block, AFPNC2f
+                                    MobileViTBlock, MV2Block, AFPNC2f, AFPNPConv, PConv, FasterBlocks, CondConv,
+                                    C2fCondConv
                                     )
 from ultralytics.nn.attention import (BiLevelRoutingAttention, BiFormerBlock, EfficientViTBlock, EfficientViTPE,
                                       EfficientViTPM, EfficientViTPES, EfficientViTPESS, EfficientViTCB,
@@ -81,6 +82,7 @@ class BaseModel(nn.Module):
             (torch.Tensor): The last output of the model.
         """
         y, dt = [], []  # outputs
+        _flops, _params = [], []
         for m in self.model:
             # m.f表示yaml中当前模块m的第一个参数, 对于concat表示要连接的某几层数, 对于其他层, 可表示上一层数
             # m.i表示yaml中当前模块m所在层数
@@ -92,9 +94,9 @@ class BaseModel(nn.Module):
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
 
             if profile:
-                self._profile_one_layer(m, x, dt)
+                self._profile_one_layer(m, x, dt, _flops, _params)
             x = m(x)  # run
-            if isinstance(m, AFPNC2f):
+            if isinstance(m, (AFPNC2f, AFPNPConv, )):
                 y.extend([x_ for x_ in x])
             else:
                 y.append(x if m.i in self.save else None)  # save output
@@ -108,7 +110,7 @@ class BaseModel(nn.Module):
                        f'Reverting to single-scale inference instead.')
         return self._predict_once(x)
 
-    def _profile_one_layer(self, m, x, dt):
+    def _profile_one_layer(self, m, x, dt, flops_l, params_l):
         """
         Profile the computation time and FLOPs of a single layer of the model on a given input. Appends the results to
         the provided list.
@@ -117,7 +119,8 @@ class BaseModel(nn.Module):
             m (nn.Module): The layer to be profiled.
             x (torch.Tensor): The input data to the layer.
             dt (list): A list to store the computation time of the layer.
-
+            flops_l (list): A list to store the FLOPs of the layer.
+            params_l (list): A list to store the parameters of the layer.
         Returns:
             None
         """
@@ -127,11 +130,13 @@ class BaseModel(nn.Module):
         for _ in range(10):
             m(x.copy() if c else x)
         dt.append((time_sync() - t) * 100)
+        flops_l.append(flops)
+        # params_l.append(m.np)
         if m == self.model[0]:
             LOGGER.info(f"{'time (ms)':>10s} {'GFLOPs':>10s} {'params':>10s}  module")
         LOGGER.info(f'{dt[-1]:10.2f} {flops:10.2f} {m.np:10.0f}  {m.type}')
         if c:
-            LOGGER.info(f"{sum(dt):10.2f} {'-':>10s} {'-':>10s}  Total")
+            LOGGER.info(f"{sum(dt):10.2f} {sum(flops_l):>10.2f} {'-':>10s}  Total")
 
     def fuse(self, verbose=True):
         """
@@ -266,7 +271,7 @@ class DetectionModel(BaseModel):
             s = 640  # 2x min stride, 生成model时的大小(还未进入训练), 640
             m.inplace = self.inplace
             forward = lambda x: self.forward(x, profile=self.profile)[0] if isinstance(m, (Segment, Pose)) else self.forward(x, profile=self.profile)
-            m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
+            m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(2, ch, s, s))])  # forward
             self.stride = m.stride
             m.bias_init()  # only run once
         else:
@@ -699,6 +704,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 
     if act:
         Conv.default_act = eval(act)  # redefine default activation, i.e. Conv.default_act = nn.SiLU()
+        CondConv.default_act = eval(act)
         if verbose:
             LOGGER.info(f"{colorstr('activation:')} {act}")  # print
 
@@ -718,13 +724,14 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
         if m in (Classify, Conv, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, DWConv, Focus,
                  BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x, RepC3,
-                 ConvOD, C2fOD, BottleneckOD, C2fFaster, C2fBoT, BiFormerBlock):
+                 ConvOD, C2fOD, BottleneckOD, C2fFaster, C2fBoT, BiFormerBlock, PConv, CondConv, C2fCondConv):
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
 
             args = [c1, c2, *args[1:]]
-            if m in (BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, C3x, RepC3, C2fFaster, C2fBoT, C2fOD
+            if m in (BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, C3x, RepC3, C2fFaster, C2fBoT, C2fOD, CondConv,
+                     C2fCondConv
                      ):
                 args.insert(2, n)  # number of repeats
                 n = 1
@@ -837,9 +844,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c1, args[1], args[2], args[3], args[4], resolution, kernels, multi_v, hidden_ratio, act_layer]
             resolutions.append(resolution)
 
-        elif m is AFPNC2f:
+        elif m in (AFPNC2f, AFPNPConv):
             act_layer = build_act(args[1])
-            args = [[ch[x] for x in f], args[0], act_layer, args[2]]
+            args = [[ch[x] for x in f], args[0], act_layer, args[2], *args[3:]]
             fuse_ch = [ch[x] for x in f]
 
         elif m is EfficientFormerStem:
@@ -855,7 +862,6 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         elif m is EFMetaBlock:
             c1, c2 = ch[f], ch[f]
             depths = d.get('depths')
-            multi_v = d.get('multi_v', 4.)
             num_head = d.get('num_head', 8)
             q_k_dim = d.get('q_k_dim', 32)
             pool_size = d.get('pool_size', 3)
@@ -867,8 +873,25 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             use_layer_scale = d.get('use_layer_scale', True),
             layer_scale_init_value = eval(d.get('layer_scale_init_value', '1e-5'))
             vit_num = d.get('vit_num')
+            multi_v = max(c1 / (q_k_dim * num_head), 1.0)
             args = [c1, args[0], depths, multi_v, num_head, q_k_dim, pool_size, mlp_ratio, act_layer, norm_layer,
                     drop_ratio, drop_path_ratio, use_layer_scale, layer_scale_init_value, vit_num]
+
+        elif m is FasterBlocks:
+            c1, c2 = ch[f], args[0]
+            i_stage = args[1]
+            c2 = make_divisible(min(c2, max_channels) * width, 8)
+            depths = [max(1, round(d * depth)) for d in d.get('depths')]
+            drop_path_ratios = d.get('drop_path_ratios')
+
+            dpr = [x.item() for x in torch.linspace(0, drop_path_ratios, sum(depths))]
+            mlp_ratio = d.get('mlp_ratio', 2.)
+            use_layer_scale = d.get('use_layer_scale', True)
+            layer_scale_init_value = eval(d.get('layer_scale_init_value', '1e-5'))
+            pconv_fw_type = d.get('pconv_fw_type', 'split_cat')
+            args = [c1, c2, n, dpr[sum(depths[: i_stage]): sum(depths[: i_stage + 1])], args[2], mlp_ratio,
+                    use_layer_scale, layer_scale_init_value, pconv_fw_type]
+            n = 1
 
         else:
             c2 = ch[f]
@@ -885,7 +908,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             ch = []
         if m in (FasterNet, ):
             ch.extend(backbone_ch)
-        elif m is AFPNC2f:
+        elif m in (AFPNC2f, AFPNPConv):
             ch.extend(fuse_ch)
         else:
             ch.append(c2)

@@ -19,9 +19,9 @@ Example:
 
 from .block import (C1, C2, C3, C3TR, DFL, SPP, SPPF, Bottleneck, BottleneckCSP, C2f, C3Ghost, C3x, GhostBottleneck,
                     HGBlock, HGStem, Proto, RepC3, C2fOD, BottleneckOD, CABlock, C2fFaster, SEBlock, SKBlock, C2fBoT,
-                    AFPNC2f,)
+                    AFPNC2f, AFPNPConv, FasterBlocks, C2fCondConv)
 from .conv import (CBAM, ChannelAttention, Concat, Conv, Conv2, ConvTranspose, DWConv, DWConvTranspose2d, Focus,
-                   GhostConv, LightConv, RepConv, SpatialAttention, ConvOD, ODConv, PartialConv)
+                   GhostConv, LightConv, RepConv, SpatialAttention, ConvOD, ODConv, PartialConv, PConv, CondConv)
 from .head import Classify, Detect, Pose, RTDETRDecoder, Segment
 from .transformer import (AIFI, MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer, LayerNorm2d,
                           MLPBlock, MSDeformAttn, TransformerBlock, TransformerEncoderLayer, TransformerLayer)
@@ -36,5 +36,6 @@ __all__ = ('Conv', 'Conv2', 'LightConv', 'RepConv', 'DWConv', 'DWConvTranspose2d
            'DeformableTransformerDecoder', 'DeformableTransformerDecoderLayer', 'MSDeformAttn', 'MLP',
            'ConvOD', 'ODConv', 'C2fOD', 'BottleneckOD', 'CABlock', 'FasterNet', 'C2fFaster',
            'FasterNetBlock', 'PatchEmbedding', 'PatchMerging', 'FasterBasicStage', 'SKBlock', 'SEBlock', 'C2fBoT',
-           'MobileViTBlock', 'MV2Block', 'AFPNC2f'
+           'MobileViTBlock', 'MV2Block', 'AFPNC2f', 'AFPNPConv', 'PConv', 'FasterBlocks', 'CondConv',
+           'C2fCondConv'
            )

@@ -235,7 +235,7 @@ class Attention(nn.Module):
         # attn: (b, length, length)
         attn = (q @ k.transpose(-2, -1)) * self.scale
         # attn_bias scale alignment
-        training_ab = torch.nn.functional.interpolate(training_ab.unsqueeze(0), size=(attn.size(-2), attn.size(-1)), mode='bicubic')
+        training_ab = torch.nn.functional.interpolate(training_ab.unsqueeze(0), size=(attn.size(-2), attn.size(-1)), mode='bilinear')
 
         attn = attn + training_ab
         attn = attn.softmax(dim=-1)
@@ -311,7 +311,12 @@ class MB3D(nn.Module):
             )
 
     def forward(self, x: torch.Tensor):
-        b, length, c = x.shape
+        """
+        x dim is (B, C, H, W)
+        """
+        # b, length, c = x.shape
+        b, c, h, w = x.shape
+        x = rearrange(x, 'b c h w -> b (h w) c')
         if self.use_layer_scale:
             x = x + self.drop_path(self.layer_scale_1.unsqueeze(0).unsqueeze(0) * self.token_mixer(self.norm1(x)))
             x = x + self.drop_path(self.layer_scale_2.unsqueeze(0).unsqueeze(0) * self.mlp(self.norm2(x)))
@@ -319,8 +324,7 @@ class MB3D(nn.Module):
             x = x + self.drop_path(self.token_mixer(self.norm1(x)))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
 
-        if self.reshape4d:
-            x = rearrange(x, 'b (h w) c -> b c h w', h=int(length ** 0.5), w = int(length ** 0.5))
+        x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
         return x
 
 
@@ -378,9 +382,9 @@ class MetaBlock(nn.Module):
     ):
         super(MetaBlock, self).__init__()
         blocks = []
-        if index == 3 and vit_num == depths[index]:
-            flat = Flat()
-            blocks.append(flat)
+        # if index == 3 and vit_num == depths[index]:
+        #     flat = Flat()
+        #     blocks.append(flat)
         for block_idx in range(depths[index]):
             block_dpr = drop_path_ratio * (
                     block_idx + sum(depths[:index])) / (sum(depths) - 1)
@@ -402,8 +406,8 @@ class MetaBlock(nn.Module):
                     'layer_scale_init_value': layer_scale_init_value
                 }
                 # *为了统一维度便于特征融合, 在最后一个MB3D, 将3D -> 4D
-                if vit_num == 1:
-                    temp_kwargs['reshape4d'] = True,
+                # if vit_num == 1:
+                #     temp_kwargs['reshape4d'] = True,
                 blocks.append(MB3D(**temp_kwargs))
                 vit_num -= 1
             else:
@@ -417,9 +421,9 @@ class MetaBlock(nn.Module):
                     layer_scale_init_value=layer_scale_init_value,
                     act_layer=act_layer
                 ))
-                if index == 3 and depths[index] - block_idx - 1 == vit_num:
-                    flat = Flat()
-                    blocks.append(flat)
+                # if index == 3 and depths[index] - block_idx - 1 == vit_num:
+                #     flat = Flat()
+                #     blocks.append(flat)
         self.blocks = nn.Sequential(*blocks)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

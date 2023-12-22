@@ -8,11 +8,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import typing as t
 
-from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, ConvOD, PartialConv
+from timm.layers import DropPath
+
+from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, ConvOD, PartialConv, PConv, CondConv
 from .transformer import TransformerBlock
 __all__ = ('DFL', 'HGBlock', 'HGStem', 'SPP', 'SPPF', 'C1', 'C2', 'C3', 'C2f', 'C2fOD', 'C3x', 'C3TR', 'C3Ghost',
            'GhostBottleneck', 'Bottleneck', 'BottleneckCSP', 'BottleneckOD', 'Proto', 'RepC3', 'CABlock', 'C2fFaster',
-           'SEBlock', 'SKBlock', 'C2fBoT', 'AFPNC2f')
+           'SEBlock', 'SKBlock', 'C2fBoT', 'AFPNC2f', 'AFPNPConv', 'FasterBlocks', 'C2fCondConv')
 
 
 class DFL(nn.Module):
@@ -263,6 +265,27 @@ class C2fFaster(C2f):
         self.m = nn.ModuleList(BottleneckFaster(self.c, self.c, shortcut, n_div, pconv_fw_type,
                                                 g, e=1.0) for _ in range(n))
 
+# class C2fPConv(nn.Module):
+#     """
+#     Replace all Convs in the C2f block with PConv
+#     """
+#
+#     def __init__(
+#             self,
+#             c1: int,
+#             c2: int,
+#             n: int = 1,
+#             shortcut: bool = False,
+#             n_div: int = 4,
+#             g: int = 1,
+#             e: float = 0.5,
+#     ):
+#         super(C2fPConv, self).__init__()
+#         self.c = int (c1 * e)
+#         self.cv1 = PConv(c1, 2 * self.c, 1, 1, n_div=2)
+#         self.cv2 = PConv((2 + n) * self.c, c2, 1, 1, n_div=2)
+#         # self.m = nn.ModuleList(BottleneckPConv)
+
 
 class C3(nn.Module):
     """CSP Bottleneck with 3 convolutions."""
@@ -431,26 +454,11 @@ class BottleneckFaster(nn.Module):
         c_ = int(c1 * e)
         self.cv1 = PartialConv(c1, n_div, forward=pconv_fw_type)
         self.cv2 = Conv(c1, c_, 1, 1)
-        # self.cv3 = Conv(c_, c2, 1, 1, g=g)
         self.cv3 = nn.Conv2d(c_, c2, 1, 1, groups=g)
         self.add = shortcut and c1 == c2
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.cv3(self.cv2(self.cv1(x))) if self.add else self.cv3(self.cv2(self.cv1(x)))
-
-
-
-class SpatialACT(nn.Module):
-    """
-    which is smoother than Relu
-    """
-
-    def __init__(self, inplace=True):
-        super(SpatialACT, self).__init__()
-        self.act = nn.ReLU6(inplace=inplace)
-
-    def forward(self, x: torch.Tensor):
-        return x * self.act(x + 3) / 6
 
 
 class CABlock(nn.Module):
@@ -474,25 +482,20 @@ class CABlock(nn.Module):
             in_chans: int,
             out_chans: int,
             reduction: int = 32,
-            norm_layer: t.Optional[nn.Module] = None,
             act_layer: t.Optional[nn.Module] = None,
     ):
         super(CABlock, self).__init__()
-        if norm_layer is None:
-            norm_layer = nn.BatchNorm2d
         if act_layer is None:
-            act_layer = nn.ReLU6
+            act_layer = nn.Hardswish
         self.in_chans = in_chans
         self.out_chans = out_chans
-        # (C, H, 1)
-        self.gap_h = nn.AdaptiveAvgPool2d((None, 1))
-        # (C, 1, W)
-        self.gap_w = nn.AdaptiveAvgPool2d((1, None))
+        # # (B, C, H, 1)
+        # self.gap_h = nn.AdaptiveAvgPool2d((None, 1))
+        # # (B, C, 1, W)
+        # self.gap_w = nn.AdaptiveAvgPool2d((1, None))
 
         hidden_chans = max(8, in_chans // reduction)
-        self.conv1 = nn.Conv2d(in_chans, hidden_chans, 1)
-        self.bn1 = norm_layer(hidden_chans)
-        self.act = SpatialACT(inplace=True)
+        self.cv = Conv(in_chans, hidden_chans, act=act_layer(inplace=True))
 
         self.attn_h = nn.Conv2d(hidden_chans, out_chans, 1)
         self.attn_w = nn.Conv2d(hidden_chans, out_chans, 1)
@@ -519,15 +522,20 @@ class CABlock(nn.Module):
     def forward(self, x: torch.Tensor):
         identity = x
         b, c, h, w = x.size()
-        x_h = self.gap_h(x)
-        x_w = self.gap_w(x).permute(0, 1, 3, 2)
+        # (b, c, h, 1)
+        # x_h = self.gap_h(x)
+        x_h = x.mean(3, keepdim=True)
+        # (b, c, 1, w) -> (b, c, w, 1)
+        # x_w = self.gap_w(x).permute(0, 1, 3, 2)
+        x_w = x.mean(2, keepdim=True).permute(0, 1, 3, 2)
+        # (b, c, h + w, 1)
         y = torch.cat((x_h, x_w), dim=2)
-        y = self.conv1(y)
-        y = self.bn1(y)
-        y = self.act(y)
+        y = self.cv(y)
 
         # split
+        # x_h: (b, c, h, 1),  x_w: (b, c, w, 1)
         x_h, x_w = torch.split(y, [h, w], dim=2)
+        # (b, c, 1, w)
         x_w = x_w.permute(0, 1, 3, 2)
 
         # compute attention
@@ -569,24 +577,20 @@ class SEBlock(nn.Module):
             out_chans: int,
             reduction: int = 16,
             attention_mode: str = 'conv',
-            act_layer: t.Optional[nn.Module] = None,
     ):
         super(SEBlock, self).__init__()
-        if act_layer is None:
-            act_layer = nn.SiLU
         # part 1:(H, W, C) -> (1, 1, C)
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        # self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.attention_mode = attention_mode
         # part 2, compute weight of each channel
         if attention_mode == 'conv':
-            self.fc = nn.Sequential(
-                nn.Conv2d(in_chans, out_chans // reduction, 1, bias=False),
-                act_layer(inplace=True),
+            self.attn = nn.Sequential(
+                Conv(in_chans, out_chans // reduction),
                 nn.Conv2d(out_chans // reduction, out_chans, 1, bias=False),
                 nn.Sigmoid(),
             )
         else:
-            self.fc = nn.Sequential(
+            self.attn = nn.Sequential(
                 nn.Linear(in_chans, out_chans // reduction, bias=False),
                 nn.ReLU(inplace=True),
                 nn.Linear(out_chans // reduction, in_chans, bias=False),
@@ -595,11 +599,14 @@ class SEBlock(nn.Module):
 
     def forward(self, x: torch.Tensor):
         b, c, _, _ = x.size()
-        y = self.avg_pool(x)
+        y = x.mean(dim=(2, 3), keepdim=True)
         if self.attention_mode != 'conv':
             y = y.view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        return x * y.expand_as(x)
+            y = self.attn(y)
+            y = y.view(b, c, 1, 1)
+        else:
+            y = self.attn(y)
+        return x * y
 
 
 class SKBlock(nn.Module):
@@ -638,7 +645,7 @@ class SKBlock(nn.Module):
         """
         super(SKBlock, self).__init__()
         if act_layer is None:
-            act_layer = nn.SiLU
+            act_layer = nn.ReLU
         self.num = num
         self.out_chans = out_chans
         self.conv = nn.ModuleList()
@@ -651,14 +658,13 @@ class SKBlock(nn.Module):
         assert attention_mode in ['conv', 'linear'], 'fc layer should be implemented by conv or linear'
         self.attention_mode = 'conv'
         if attention_mode == 'conv':
-            self.fc = nn.Sequential(
+            self.attn = nn.Sequential(
                 # use relu act to improve nonlinear expression ability
-                nn.Conv2d(in_chans, out_chans // reduction, 1, bias=False),
-                act_layer(inplace=True),
+                Conv(in_chans, out_chans // reduction),
                 nn.Conv2d(out_chans // reduction, out_chans * self.num, 1, bias=False),
             )
         else:
-            self.fc = nn.Sequential(
+            self.attn = nn.Sequential(
                 nn.Linear(in_chans, out_chans // reduction, bias=False),
                 act_layer(inplace=True),
                 nn.Linear(out_chans // reduction, out_chans * self.num, bias=False)
@@ -673,12 +679,14 @@ class SKBlock(nn.Module):
         # fuse different output
         u = reduce(lambda a, b: a + b, temp_feature)
         # squeeze
-        u = self.gap(u)
+        u = u.mean((2, 3), keepdims=True)
         # excitation
         if self.attention_mode != 'conv':
             u = u.view(batch, c)
-        z = self.fc(u)
-        z = z.reshape(batch, self.num, self.out_chans, -1)
+            z = self.attn(u)
+            z = z.reshape(batch, self.num, self.out_chans, -1)
+        else:
+            z = self.attn(u)
         z = self.softmax(z)
         # select
         a_b_weight: t.List[..., torch.Tensor] = torch.chunk(z, self.num, dim=1)
@@ -857,8 +865,8 @@ class ASFFTwo(nn.Module):
             act_layer = nn.ReLU
         compress_c = 8
         self.in_chas = in_chans
-        self.weight_level_1 = Conv(in_chans, compress_c, 1, 1, act=act_layer(inplace=False))
-        self.weight_level_2 = Conv(in_chans, compress_c, 1, 1, act=act_layer(inplace=False))
+        self.weight_level_1 = Conv(in_chans, compress_c, 1, 1, act=act_layer(inplace=True))
+        self.weight_level_2 = Conv(in_chans, compress_c, 1, 1, act=act_layer(inplace=True))
 
         # spatial attention
         self.weight_levels = nn.Conv2d(compress_c * 2, 2, kernel_size=1, stride=1, bias=True)
@@ -895,9 +903,9 @@ class ASFFThree(nn.Module):
             act_layer = nn.ReLU
         self.in_chans = in_chans
         compress_c = 8
-        self.weight_level_1 = Conv(in_chans, compress_c, 1, 1, act=act_layer(inplace=False))
-        self.weight_level_2 = Conv(in_chans, compress_c, 1, 1, act=act_layer(inplace=False))
-        self.weight_level_3 = Conv(in_chans, compress_c, 1, 1, act=act_layer(inplace=False))
+        self.weight_level_1 = Conv(in_chans, compress_c, 1, 1, act=act_layer(inplace=True))
+        self.weight_level_2 = Conv(in_chans, compress_c, 1, 1, act=act_layer(inplace=True))
+        self.weight_level_3 = Conv(in_chans, compress_c, 1, 1, act=act_layer(inplace=True))
 
         self.weight_levels = nn.Conv2d(compress_c * 3, 3, kernel_size=1, stride=1, bias=True)
         self.softmax = nn.Softmax(dim=1)
@@ -932,7 +940,7 @@ class AFPNUpsample(nn.Module):
     ):
         super(AFPNUpsample, self).__init__()
         self.upsample = nn.Sequential(
-            Conv(in_chans, out_chans, act=act_layer(inplace=False)),
+            Conv(in_chans, out_chans, act=act_layer(inplace=True)),
             nn.Upsample(scale_factor=scale_factor, mode=mode),
         )
 
@@ -952,7 +960,7 @@ class AFPNC2f(nn.Module):
             channels: t.Union[t.List, t.Tuple],
             width: float = 1.0,
             act_layer: t.Optional[t.Callable] = None,
-            c2f_num: int = 3,
+            c2f_nums: t.List[int] = None,
     ):
         """
         Args:
@@ -963,6 +971,8 @@ class AFPNC2f(nn.Module):
         super(AFPNC2f, self).__init__()
         if act_layer is None:
             act_layer = nn.ReLU
+        if c2f_nums is None:
+            c2f_nums = [1, 2, 2]
 
         # The semantic degree, from low to high, is 0, 1, and 2, corresponding to top, mid and bottom
 
@@ -973,13 +983,13 @@ class AFPNC2f(nn.Module):
         self.asff_top1_0 = ASFFTwo(in_chans=channels[0])
         self.asff_mid1_1 = ASFFTwo(in_chans=channels[1])
 
-        self.c2f1_0 = C2f(channels[0], channels[0], c2f_num)
-        self.c2f1_1 = C2f(channels[1], channels[1], c2f_num)
+        self.c2f1_0 = C2f(channels[0], channels[0], c2f_nums[0])
+        self.c2f1_1 = C2f(channels[1], channels[1], c2f_nums[1])
 
         # dimensional alignment, fuse low, mid, high semantics layers, 2_0_1 means second fuse, from 0 layer to 1 layer
-        self.down_sample_2_0_1 = Conv(channels[0], channels[1], 2, 2, p=0, act=act_layer(inplace=False))
-        self.down_sample_2_0_2 = Conv(channels[0], channels[2], 4, 4, p=0, act=act_layer(inplace=False))
-        self.down_sample_2_1_2 = Conv(channels[1], channels[2], 2, 2, p=0, act=act_layer(inplace=False))
+        self.down_sample_2_0_1 = Conv(channels[0], channels[1], 2, 2, p=0, act=act_layer(inplace=True))
+        self.down_sample_2_0_2 = Conv(channels[0], channels[2], 4, 4, p=0, act=act_layer(inplace=True))
+        self.down_sample_2_1_2 = Conv(channels[1], channels[2], 2, 2, p=0, act=act_layer(inplace=True))
         self.up_sample_2_1_0 = AFPNUpsample(channels[1], channels[0], act_layer=act_layer, scale_factor=2,
                                             mode='bilinear')
         self.up_sample_2_2_0 = AFPNUpsample(channels[2], channels[0], act_layer=act_layer, scale_factor=4,
@@ -991,32 +1001,314 @@ class AFPNC2f(nn.Module):
         self.asff_top2_0 = ASFFThree(in_chans=channels[0], out_chans=int(channels[0] * width))
         self.asff_mid2_1 = ASFFThree(in_chans=channels[1], out_chans=int(channels[1] * width))
         self.asff_bottom2_2 = ASFFThree(in_chans=channels[2], out_chans=int(channels[2] * width))
-        self.c2f2_0 = C2f(channels[0], channels[0], c2f_num)
-        self.c2f2_1 = C2f(channels[1], channels[1], c2f_num)
-        self.c2f2_2 = C2f(channels[2], channels[2], c2f_num)
+        self.c2f2_0 = C2f(channels[0], channels[0], c2f_nums[0])
+        self.c2f2_1 = C2f(channels[1], channels[1], c2f_nums[1])
+        self.c2f2_2 = C2f(channels[2], channels[2], c2f_nums[2])
 
 
     def forward(self, x: t.Union[t.List[torch.Tensor], t.Tuple[torch.Tensor]]) -> t.Tuple[torch.Tensor, ...]:
         x0, x1, x2 = x
 
-        x1_0 = self.asff_top1_0(x0, self.up_sample_1_1_0(x1))
-        x1_1 = self.asff_mid1_1(self.down_sample_1_0_1(x0), x1)
+        top = self.asff_top1_0(x0, self.up_sample_1_1_0(x1))
+        mid = self.asff_mid1_1(self.down_sample_1_0_1(x0), x1)
 
-        x1_0 = self.c2f1_0(x1_0)
-        x1_1 = self.c2f1_1(x1_1)
+        x0 = self.c2f1_0(top)
+        x1 = self.c2f1_1(mid)
 
-        x2_0 = self.asff_top2_0(x1_0, self.up_sample_2_1_0(x1_1), self.up_sample_2_2_0(x2))
-        x2_1 = self.asff_mid2_1(self.down_sample_2_0_1(x1_0), x1_1, self.up_sample_2_2_1(x2))
-        x2_2 = self.asff_bottom2_2(self.down_sample_2_0_2(x1_0), self.down_sample_2_1_2(x1_1), x2)
+        top = self.asff_top2_0(x0, self.up_sample_2_1_0(x1), self.up_sample_2_2_0(x2))
+        mid = self.asff_mid2_1(self.down_sample_2_0_1(x0), x1, self.up_sample_2_2_1(x2))
+        bot = self.asff_bottom2_2(self.down_sample_2_0_2(x0), self.down_sample_2_1_2(x1), x2)
 
-        x2_0 = self.c2f2_0(x2_0)
-        x2_1 = self.c2f2_1(x2_1)
-        x2_2 = self.c2f2_2(x2_2)
+        top = self.c2f2_0(top)
+        mid = self.c2f2_1(mid)
+        bot = self.c2f2_2(bot)
 
-        return x2_0, x2_1, x2_2
+        return top, mid, bot
+
+class FasterBlocks(nn.Module):
+    """
+    stacking multiple  FasterBlock
+    """
+
+    def __init__(
+            self,
+            dim: int,
+            out_dim: int,
+            n: int,
+            drop_paths: t.List[float],
+            n_div: int = 4,
+            mlp_ratio: float = 2.,
+            use_layer_scale: bool = True,
+            layer_scale_init_value: float = 1e-5,
+            pconv_fw_type: str = 'split_cat',
+    ):
+        super(FasterBlocks, self).__init__()
+        blocks = []
+        for i in range(n):
+            blocks.append(FasterBlock(
+                dim=dim,
+                out_dim=out_dim,
+                drop_path=drop_paths[i],
+                n_div=n_div,
+                mlp_ratio=mlp_ratio,
+                use_layer_scale=use_layer_scale,
+                layer_scale_init_value=layer_scale_init_value,
+                pconv_fw_type=pconv_fw_type
+            ))
+            dim=out_dim
+        self.blocks = nn.Sequential(*blocks)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.blocks(x)
+
+class FasterBlock(nn.Module):
+    """
+    based on PConv + PWC
+    """
+    def __init__(
+            self,
+            dim: int,
+            out_dim: int,
+            drop_path: float,
+            n_div: int = 4,
+            mlp_ratio: float = 2.,
+            use_layer_scale: bool = True,
+            layer_scale_init_value: float = 1e-5,
+            pconv_fw_type: str = 'split_cat',
+    ):
+        super(FasterBlock, self).__init__()
+        self.dim = dim
+        self.mlp_ratio = mlp_ratio
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.n_div = n_div
+        hidden_chans = int(dim * mlp_ratio)
+
+        self.token_mixer = PartialConv(dim, n_div, pconv_fw_type)
+        self.mlp = nn.Sequential(
+            Conv(dim, hidden_chans, k=1, s=1),
+            Conv(hidden_chans, dim, k=1, s=1, act=False),
+        )
+        self.use_layer_scale = use_layer_scale
+        if use_layer_scale:
+            self.layer_scale = nn.Parameter(
+                layer_scale_init_value * torch.ones((dim, ), requires_grad=True)
+            )
+        # adapt to neck, since dim and dim_out may be different
+        self.dim = dim
+        self.out_dim = out_dim
+        if dim != out_dim:
+            self.trans = Conv(dim, out_dim, k=1, s=1, act=False)
+
+    def forward(self, x: torch.Tensor):
+        """
+        X dim is (B, C, H, W)
+        """
+        identity = x
+        x = self.token_mixer(x)
+        if self.use_layer_scale:
+            x = identity + self.drop_path(self.layer_scale.unsqueeze(-1).unsqueeze(-1) * self.mlp(x))
+        else:
+            x = identity + self.drop_path(self.mlp(x))
+        if self.dim != self.out_dim:
+            x = self.trans(x)
+        return x
+
+class AFPNPConv(nn.Module):
+    """
+    Asymptotic Feature Pyramid Network (AFPN) + Pconv
+    AFPN Block, it adopts cross layer progressive fusion and adaptive space-wise attention mechanism (ASFF)
+    """
+
+    def __init__(
+            self,
+            channels: t.Union[t.List, t.Tuple],
+            width: float = 1.0,
+            act_layer: t.Optional[t.Callable] = None,
+            c2f_nums: t.List[int] = None,
+            drop_path_ratio: float = 0.,
+            n_div: int = 4,
+            mlp_ratio: float = 2.,
+            use_layer_scale: bool = True,
+            layer_scale_init_value: float = 1e-5
+    ):
+        """
+        Args:
+            channels: the number of channels for different layers used for fusion
+            width: width param used to implement models at different scales in the channel dimension
+            act_layer: activate layers
+        """
+        super(AFPNPConv, self).__init__()
+        if act_layer is None:
+            act_layer = nn.ReLU
+        if c2f_nums is None:
+            c2f_nums = [1, 2, 2]
+
+        # The semantic degree, from low to high, is 0, 1, and 2, corresponding to top, mid and bottom
+
+        # dimensional alignment, fuse low and mid semantics layers, 0_0_1 means first fuse, from 0 layer to 1 layer
+        self.down_sample_1_0_1 = Conv(channels[0], channels[1], 2, 2, p=0, act=act_layer(inplace=True))
+        self.up_sample_1_1_0 = AFPNUpsample(channels[1], channels[0], act_layer=act_layer)
+        # 1_0 means first fuse, fused layer is 0 layer
+        self.asff_top1_0 = ASFFTwo(in_chans=channels[0])
+        self.asff_mid1_1 = ASFFTwo(in_chans=channels[1])
+
+        self.c2f1_0 = nn.Sequential(*(
+            FasterBlock(
+                dim=channels[0],
+                drop_path=drop_path_ratio,
+                n_div=n_div,
+                mlp_ratio=mlp_ratio,
+                use_layer_scale=use_layer_scale,
+                layer_scale_init_value=layer_scale_init_value
+            )
+        for _ in range(c2f_nums[0])))
+
+        self.c2f1_1 = nn.Sequential(*(
+            FasterBlock(
+                dim=channels[1],
+                drop_path=drop_path_ratio,
+                n_div=n_div,
+                mlp_ratio=mlp_ratio,
+                use_layer_scale=use_layer_scale,
+                layer_scale_init_value=layer_scale_init_value
+            ) for _ in range(c2f_nums[1])
+        ))
+
+        # dimensional alignment, fuse low, mid, high semantics layers, 2_0_1 means second fuse, from 0 layer to 1 layer
+        self.down_sample_2_0_1 = Conv(channels[0], channels[1], 2, 2, p=0, act=act_layer(inplace=True))
+        self.down_sample_2_0_2 = Conv(channels[0], channels[2], 4, 4, p=0, act=act_layer(inplace=True))
+        self.down_sample_2_1_2 = Conv(channels[1], channels[2], 2, 2, p=0, act=act_layer(inplace=True))
+        self.up_sample_2_1_0 = AFPNUpsample(channels[1], channels[0], act_layer=act_layer, scale_factor=2,
+                                            mode='bilinear')
+        self.up_sample_2_2_0 = AFPNUpsample(channels[2], channels[0], act_layer=act_layer, scale_factor=4,
+                                            mode='bilinear')
+        self.up_sample_2_2_1 = AFPNUpsample(channels[2], channels[1], act_layer=act_layer, scale_factor=2,
+                                            mode='bilinear')
+
+        # 2_0 means second fuse, fused layer is 1 layer
+        self.asff_top2_0 = ASFFThree(in_chans=channels[0], out_chans=int(channels[0] * width))
+        self.asff_mid2_1 = ASFFThree(in_chans=channels[1], out_chans=int(channels[1] * width))
+        self.asff_bottom2_2 = ASFFThree(in_chans=channels[2], out_chans=int(channels[2] * width))
 
 
-    
-    
-    
+        self.c2f2_0 = nn.Sequential(*(
+            FasterBlock(
+                dim=channels[0],
+                drop_path=drop_path_ratio,
+                n_div=n_div,
+                mlp_ratio=mlp_ratio,
+                use_layer_scale=use_layer_scale,
+                layer_scale_init_value=layer_scale_init_value
+            )
+        for _ in range(c2f_nums[0])))
+        self.c2f2_1 = nn.Sequential(*(
+            FasterBlock(
+                dim=channels[1],
+                drop_path=drop_path_ratio,
+                n_div=n_div,
+                mlp_ratio=mlp_ratio,
+                use_layer_scale=use_layer_scale,
+                layer_scale_init_value=layer_scale_init_value
+            )
+        for _ in range(c2f_nums[1])))
+
+        self.c2f2_2 = nn.Sequential(*(
+            FasterBlock(
+                dim=channels[2],
+                drop_path=drop_path_ratio,
+                n_div=n_div,
+                mlp_ratio=mlp_ratio,
+                use_layer_scale=use_layer_scale,
+                layer_scale_init_value=layer_scale_init_value
+            )
+        for _ in range(c2f_nums[2])))
+
+
+    def forward(self, x: t.Union[t.List[torch.Tensor], t.Tuple[torch.Tensor]]) -> t.Tuple[torch.Tensor, ...]:
+        x0, x1, x2 = x
+
+        top = self.asff_top1_0(x0, self.up_sample_1_1_0(x1))
+        mid = self.asff_mid1_1(self.down_sample_1_0_1(x0), x1)
+
+        x0 = self.c2f1_0(top)
+        x1 = self.c2f1_1(mid)
+
+        top = self.asff_top2_0(x0, self.up_sample_2_1_0(x1), self.up_sample_2_2_0(x2))
+        mid = self.asff_mid2_1(self.down_sample_2_0_1(x0), x1, self.up_sample_2_2_1(x2))
+        bot = self.asff_bottom2_2(self.down_sample_2_0_2(x0), self.down_sample_2_1_2(x1), x2)
+
+        top = self.c2f2_0(top)
+        mid = self.c2f2_1(mid)
+        bot = self.c2f2_2(bot)
+
+        return top, mid, bot
+
+
+class BottleneckCondConv(nn.Module):
+    """
+    Bottleneck with CondConv
+    """
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            shortcut: bool = True,
+            g: int = 1,
+            k: t.Tuple = (3, 3),
+            e: float = 0.5,
+            experts_num: int = 8,
+            drop_ratio: float = 0.2,
+    ):
+        super(BottleneckCondConv, self).__init__()
+        c_ = int(c1 * e)
+        self.cv1 = CondConv(c1, c_, kernel_size=k[0], experts_num=experts_num, groups=g, drop_ratio=drop_ratio)
+        self.cv2 = CondConv(c_, c2, kernel_size=k[1], experts_num=experts_num, groups=g, drop_ratio=drop_ratio)
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x):
+        """'forward()' applies the YOLO FPN to input data."""
+        return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
+
+
+class C2fCondConv(nn.Module):
+    """
+    C2f with CondConv
+    """
+
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            n: int = 1,
+            shortcut: bool = False,
+            experts_num: int = 8,
+            drop_ratio: float = 0.2,
+            g: int = 1,
+            e: float = 0.5,
+    ):
+        """Initialize CSP bottleneck layer with two convolutions with arguments ch_in, ch_out, number, shortcut, groups,
+        expansion.
+        """
+        super().__init__()
+        # 分割梯度流
+        self.c = int(c2 * e)  # hidden channels
+        self.cv1 = CondConv(c1, 2 * self.c, 1, 1, experts_num=experts_num, drop_ratio=drop_ratio)
+        self.cv2 = CondConv((2 + n) * self.c, c2, 1, experts_num=experts_num, drop_ratio=drop_ratio)
+        self.m = nn.ModuleList(BottleneckCondConv(self.c, self.c, shortcut, g, k=(3, 3),
+                                                  e=1.0, experts_num=experts_num, drop_ratio=drop_ratio)
+                               for _ in range(n))
+
+    def forward(self, x) -> torch.Tensor:
+        """Forward pass through C2f layer."""
+        # 沿着通道维度进行拆分
+        y = list(self.cv1(x).chunk(2, 1))
+        # 右半部分经过一系列的Bottleneck, 将Yolo中的Conv块替换为Bottleneck残差结构
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+
+    def forward_split(self, x) -> torch.Tensor:
+        """Forward pass using split() instead of chunk()."""
+        y = list(self.cv1(x).split((self.c, self.c), 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
 

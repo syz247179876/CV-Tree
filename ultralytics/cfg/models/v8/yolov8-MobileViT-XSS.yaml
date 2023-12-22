@@ -4,6 +4,9 @@
 # Whether to enable performance analysis for each layer of the model
 profile: true
 
+# width multiplier
+width_m: 1.0
+
 # Parameters
 nc: 80  # number of classes
 scales: # model compound scaling constants, i.e. 'model=yolov8n.yaml' will call yolov8.yaml with scale 'n'

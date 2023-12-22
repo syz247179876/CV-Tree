@@ -11,6 +11,6 @@ def get_model(model: str, device: str = 'cuda'):
     return model
 
 if __name__ == '__main__':
-    model = get_model('yolov8-EfficientVit-M4-backbone.yaml')
-    model.train(data=DATASET_EXDARK, epochs=300, batch=32, lr0=0.01,
-                name=f'train-{DATASET_EXDARK}-EfficientVit-M4-backbone')
+    model = get_model('yolov8s-EfficientVit-M4-backbone.yaml')
+    model.train(data=DATASET_VOC, epochs=300, batch=32, lr0=0.02,
+                name=f'train-{DATASET_VOC}-EfficientVit-M4-backbone')

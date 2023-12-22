@@ -12,6 +12,6 @@ def get_model(model: str, device: str = 'cuda'):
 
 if __name__ == '__main__':
     yaml_file = r'yolov8-EfficientViT-M5-backbone-optimize.yaml'
-    model = get_model(last_model)
+    model = get_model(yaml_file)
     model.train(data=DATASET_EXDARK, epochs=300, batch=16, lr0=0.01,
                 name=f'train-{DATASET_EXDARK}-EfficientVit-M5-backbone-optimize', resume=True)

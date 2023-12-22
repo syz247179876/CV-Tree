@@ -1,7 +1,6 @@
 """
-YoloV8 baseline + SEBlock(neck)
+YoloV8 baseline + AFPN + PConv
 """
-
 from ultralytics.models import YOLO
 from ultralytics.alchemy.settings import *
 from ultralytics.utils.wraps import log_profile
@@ -12,5 +11,5 @@ def get_model(model: str, device: str = 'cuda'):
     return model
 
 if __name__ == '__main__':
-    model = get_model('yolov8n-SE.yaml')
-    model.train(data=DATASET_VOC, epochs=300, batch=32, lr0=0.01, name=f'train-{DATASET_VOC}-SE')
+    model = get_model('yolov8s-AFPN-PConv.yaml')
+    model.train(data=DATASET_VOC, epochs=300, batch=32, lr0=0.01, name=f'train-{DATASET_VOC}-AFPNC2f-PConv')

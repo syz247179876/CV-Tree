@@ -7,6 +7,8 @@ from .EfficientFormer import (Stem as EfficientFormerStem, MetaBlock as EFMetaBl
                             Conv2dBN as EfficientFormerCB
                               )
 
+from .CloFormer import (PatchEmbedding as CloFormerStem, CloLayer, CloBlock, LightStem as CloFormerLightStem)
+
 __all__ = [
     # BiFormer
     'BiLevelRoutingAttention',
@@ -26,4 +28,10 @@ __all__ = [
     'EFMetaBlock',
     'EfficientFormerPM',
     'EfficientFormerCB',
+
+    # CloFormer
+    'CloFormerStem',
+    'CloLayer',
+    'CloBlock',
+    'CloFormerLightStem'
 ]

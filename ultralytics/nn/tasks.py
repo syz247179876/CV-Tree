@@ -14,11 +14,12 @@ from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottlenec
                                     RTDETRDecoder, Segment, ConvOD, C2fOD, BottleneckOD, CABlock, FasterNet, C2fFaster,
                                     PatchMerging, PatchEmbedding, FasterBasicStage, SKBlock, SEBlock, C2fBoT,
                                     MobileViTBlock, MV2Block, AFPNC2f, AFPNPConv, PConv, FasterBlocks, CondConv,
-                                    C2fCondConv
+                                    C2fCondConv, CPCA, ECA
                                     )
 from ultralytics.nn.attention import (BiLevelRoutingAttention, BiFormerBlock, EfficientViTBlock, EfficientViTPE,
                                       EfficientViTPM, EfficientViTPES, EfficientViTPESS, EfficientViTCB,
                                       EfficientFormerStem, EFMetaBlock, EfficientFormerPM, EfficientFormerCB,
+                                      CloFormerStem, CloLayer, CloBlock, CloFormerLightStem
                                       )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -892,6 +893,41 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c1, c2, n, dpr[sum(depths[: i_stage]): sum(depths[: i_stage + 1])], args[2], mlp_ratio,
                     use_layer_scale, layer_scale_init_value, pconv_fw_type]
             n = 1
+
+        elif m in (CloFormerStem,  CloFormerLightStem):
+            c1, c2 = ch[f], args[0]
+            args = [c1, c2]
+
+        elif m is CloLayer:
+            c1, c2 = ch[f], args[0]
+            i_stage = args[1]
+            downsample = args.pop()
+            use_se = d.get('use_se', False)
+            depths = d.get('depths')
+            attn_drop = d.get('attn_drop', 0.)
+            mlp_drop = d.get('mlp_drop', 0.)
+            drop_path_rate = d.get('drop_path_rate', 0.)
+            qkv_bias = d.get('qkv_bias', False)
+            dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
+            args = [c1, c2, n, *args[2: ], attn_drop, mlp_drop, dpr[sum(depths[: i_stage]): sum(depths[: i_stage + 1])],
+                    qkv_bias, use_se, downsample]
+            n = 1
+        elif m is CloBlock:
+            c1, c2 = ch[f], args[0]
+            i_stage = args[1]
+            use_se = d.get('use_se', False)
+            depths = d.get('depths')
+            attn_drop = d.get('attn_drop', 0.)
+            mlp_drop = d.get('mlp_drop', 0.)
+            drop_path_rate = d.get('drop_path_rate', 0.)
+            qkv_bias = d.get('qkv_bias', False)
+            dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
+            args = [c1, c2, *args[2:], attn_drop, mlp_drop, dpr[sum(depths[: i_stage])],
+                    qkv_bias, use_se]
+
+        elif m in [CPCA, ECA]:
+            c1, c2 = ch[f], ch[f]
+            args = [c1, *args]
 
         else:
             c2 = ch[f]

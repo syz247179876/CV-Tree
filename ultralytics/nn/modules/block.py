@@ -8,13 +8,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import typing as t
 
+from math import log
 from timm.layers import DropPath
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, ConvOD, PartialConv, PConv, CondConv
 from .transformer import TransformerBlock
 __all__ = ('DFL', 'HGBlock', 'HGStem', 'SPP', 'SPPF', 'C1', 'C2', 'C3', 'C2f', 'C2fOD', 'C3x', 'C3TR', 'C3Ghost',
            'GhostBottleneck', 'Bottleneck', 'BottleneckCSP', 'BottleneckOD', 'Proto', 'RepC3', 'CABlock', 'C2fFaster',
-           'SEBlock', 'SKBlock', 'C2fBoT', 'AFPNC2f', 'AFPNPConv', 'FasterBlocks', 'C2fCondConv')
+           'SEBlock', 'SKBlock', 'C2fBoT', 'AFPNC2f', 'AFPNPConv', 'FasterBlocks', 'C2fCondConv', 'CPCA', 'ECA')
 
 
 class DFL(nn.Module):
@@ -1311,4 +1312,123 @@ class C2fCondConv(nn.Module):
         y = list(self.cv1(x).split((self.c, self.c), 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
+
+
+class ChannelAttention(nn.Module):
+    """
+    Channel attention module based on CPCA
+    use hidden_chans to reduce parameters instead of conventional convolution
+    """
+
+    def __init__(self, in_chans: int, hidden_chans: int):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.max_pool = nn.AdaptiveMaxPool2d((1, 1))
+        self.fc1 = nn.Conv2d(in_chans, hidden_chans, kernel_size=1, stride=1, bias=True)
+        self.fc2 = nn.Conv2d(hidden_chans, in_chans, kernel_size=1, stride=1, bias=True)
+        self.act = nn.ReLU(inplace=True)
+        self.in_chans = in_chans
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x dim is (B, C, H, W)
+        """
+        # (B, C, 1, 1)
+        x1 = x.mean(dim=(2, 3), keepdim=True)
+        # x1 = self.avg_pool(x)
+        x1 = self.fc2(self.act(self.fc1(x1)))
+        x1 = torch.sigmoid(x1)
+
+        # (B, C, 1, 1)
+        x2 = x.max(dim=2, keepdim=True)[0].max(dim=3, keepdim=True)[0]
+        # x2 = self.max_pool(x)
+        x2 = self.fc2(self.act(self.fc1(x2)))
+        x2 = torch.sigmoid(x2)
+        x = x * (x1 + x2)
+        return x
+
+class CPCA(nn.Module):
+    """
+    Channel Attention and Spatial Attention based on CPCA
+    """
+    
+    def __init__(self, in_chans: int, reduction_ratio: int = 4):
+        super(CPCA, self).__init__()
+        self.in_chans = in_chans
+
+        hidden_chans = in_chans // reduction_ratio
+        # Channel Attention
+        self.ca = ChannelAttention(in_chans, hidden_chans)
+
+        # Spatial Attention
+        self.dwc5_5 = nn.Conv2d(in_chans, in_chans, kernel_size=5, padding=2, groups=in_chans)
+        self.dwc1_7 = nn.Conv2d(in_chans, in_chans, kernel_size=(1, 7), padding=(0, 3), groups=in_chans)
+        self.dwc7_1 = nn.Conv2d(in_chans, in_chans, kernel_size=(7, 1), padding=(3, 0), groups=in_chans)
+        self.dwc1_11 = nn.Conv2d(in_chans, in_chans, kernel_size=(1, 11), padding=(0, 5), groups=in_chans)
+        self.dwc11_1 = nn.Conv2d(in_chans, in_chans, kernel_size=(11, 1), padding=(5, 0), groups=in_chans)
+        self.dwc1_21 = nn.Conv2d(in_chans, in_chans, kernel_size=(1, 21), padding=(0, 10), groups=in_chans)
+        self.dwc21_1 = nn.Conv2d(in_chans, in_chans, kernel_size=(21, 1), padding=(10, 0), groups=in_chans)
+
+        # used to model feature connections between different receptive fields
+        self.conv = nn.Conv2d(in_chans, in_chans, kernel_size=1, padding=0)
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x)
+        x = self.act(x)
+        x = self.ca(x)
+
+        x_init = self.dwc5_5(x)
+        x1 = self.dwc1_7(x_init)
+        x1 = self.dwc7_1(x1)
+
+        x2 = self.dwc1_11(x_init)
+        x2 = self.dwc11_1(x2)
+
+        x3 = self.dwc1_21(x_init)
+        x3 = self.dwc21_1(x3)
+
+        spatial_atn = x1 + x2 + x3 + x_init
+        y = self.conv(x * spatial_atn)
+        return y
+
+class ECA(nn.Module):
+    """
+    Efficient Channel Attention:
+    1.Efficient and lightweight channel attention mechanism with low model complexity
+    2.The Core innovation points are as follows:
+        - dimensionality reduction may have a side effect on channel interaction, so discard it.
+        - use GWConv, which can be regarded as a depth-wise separable convolution, and generateds channel weights
+        by performing a fast 1D convolution of size K, where k is adaptively determined  via a non-linearity mapping
+        of channel dimension C.
+
+    note: transpose channel dimension and spatial dimension to use fast 1D convolution with kernel size K. K is based
+    on the channel dimension.
+    """
+
+    def __init__(
+            self,
+            in_chans: int,
+            kernel_size: t.Optional[int] = None,
+            gamma: int = 2,
+            b: int = 1,
+    ):
+        super(ECA, self).__init__()
+        # self.gap = nn.AdaptiveAvgPool2d((1, 1))
+        t = int(abs((log(in_chans, 2) + b) / gamma))
+        kernel_size = kernel_size or t if t % 2 else t + 1
+        self.conv = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=(kernel_size - 1) // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x dim is (B, C, H, W)
+        """
+        # (B, C, 1, 1)
+        y = x.mean((2, 3), keepdim=True)
+        # (B, 1, C)
+        y = self.conv(y.squeeze(-1).transpose(-1, -2))
+        # (B, C, 1, 1)
+        y = y.transpose(-1, -2).unsqueeze(-1)
+        y = self.sigmoid(y)
+        return x * y
 

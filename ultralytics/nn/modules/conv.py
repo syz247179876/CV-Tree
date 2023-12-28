@@ -159,8 +159,7 @@ class OmniAttention(nn.Module):
     def forward(self, x: torch.Tensor):
         x = self.gap(x)
         x = self.fc(x)
-        if x.size(0) > 1:
-            x = self.bn(x)
+        x = self.bn(x)
         x = self.act(x)
 
         return self.channel_attention(x), self.filter_attention(x), self.spatial_attention(x), self.expert_attention(x)
@@ -691,20 +690,22 @@ class RoutingFunc(nn.Module):
     def __init__(
             self,
             in_chans: int,
-            num_experts: int,
+            experts_num: int,
             drop_ratio: float = 0.,
             is_fc: bool = True,
     ):
         super(RoutingFunc, self).__init__()
         self.dropout = nn.Dropout(drop_ratio)
+        self.experts_num = experts_num
         self.is_fc = is_fc
         if is_fc:
-            self.attn = nn.Linear(in_chans, num_experts)
+            self.attn = nn.Linear(in_chans, experts_num)
         else:
-            self.attn = nn.Conv2d(in_chans, num_experts, kernel_size=1, bias=True)
+            self.attn = nn.Conv2d(in_chans, experts_num, kernel_size=1, bias=True)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor):
+        b, _, _, _ = x.shape
         if self.is_fc:
             # (b, c)
             x = x.mean((2, 3), keepdim=False)
@@ -714,9 +715,7 @@ class RoutingFunc(nn.Module):
         x = self.dropout(x)
         x = self.attn(x)
         x = self.sigmoid(x)
-        if not self.is_fc:
-            # (b, c)
-            x = x.view(x.size(0), x.size(1))
+        x = x.view(b, self.experts_num, 1, 1, 1, 1)
         return x
 
 class CondConv(nn.Module):
@@ -746,9 +745,8 @@ class CondConv(nn.Module):
             experts_num: int = 8,
             groups: int = 1,
             dilation: int = 1,
-            drop_ratio: float = 0.0,
+            drop_ratio: float = 0.2,
             act: t.Union[t.Callable, nn.Module, bool] = True,
-            bias: bool = False
     ):
         super(CondConv, self).__init__()
         self.experts_num = experts_num
@@ -762,15 +760,17 @@ class CondConv(nn.Module):
         self.routing = RoutingFunc(in_chans, experts_num, drop_ratio)
         # the standard dim of kernel is (out_chans, in_chans, kernel_size, kernel_size)
         # because new kernel is combined by the num_experts size kernels, so the first dim is num_experts
-        self.kernel_weights = nn.Parameter(torch.Tensor(experts_num, out_chans, in_chans // groups,
-                                                        kernel_size, kernel_size))
-        if bias:
-            self.bias = nn.Parameter(torch.Tensor(experts_num, out_chans))
-        else:
-            self.bias = None
+        self.kernel_weights = nn.Parameter(torch.randn(experts_num, out_chans, in_chans // groups,
+                                                        kernel_size, kernel_size), requires_grad=True)
 
         self.bn = nn.BatchNorm2d(out_chans)
         self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for i in range(self.experts_num):
+            nn.init.kaiming_normal_(self.kernel_weights[i], mode='fan_out', nonlinearity='relu')
 
     def forward(self, x: torch.Tensor, routing_weights: t.Optional[torch.Tensor] = None):
         b, c, h, w = x.size()
@@ -778,20 +778,15 @@ class CondConv(nn.Module):
         if routing_weights is None:
             routing_weights = self.routing(x)
         x = x.reshape(1, b * c, h, w)
-        kernel_weights = self.kernel_weights.view(self.experts_num, -1)
         # combine weights of all samples, so combined batch_size and out_chans,
         # then use group conv to split different samples
-        combined_weights = torch.mm(routing_weights, kernel_weights).view(
+        combined_weights = routing_weights * self.kernel_weights.unsqueeze(dim=0)
+        combined_weights = torch.sum(combined_weights, dim=1).view(
             -1, self.in_chans // self.groups, self.kernel_size, self.kernel_size)
-        if self.bias is not None:
-            combined_bias = torch.mm(routing_weights, self.bias).view(-1)
-            # weight dim is (b * out_chans, in_chans, k, k), bias dim is (b * out_chans), groups is self.groups * b
-            # x dim is (1, b * in_chans, h, w)
-            y = F.conv2d(x, weight=combined_weights, bias=combined_bias, stride=self.stride, dilation=self.dilation,
-                         padding=autopad(self.kernel_size, d=self.dilation), groups=self.groups * b)
-        else:
-            y = F.conv2d(x, weight=combined_weights, bias=None, stride=self.stride, dilation=self.dilation,
-                         padding=autopad(self.kernel_size, d=self.dilation), groups=self.groups * b)
+        # weight dim is (b * out_chans, in_chans, k, k), bias dim is (b * out_chans), groups is self.groups * b
+        # x dim is (1, b * in_chans, h, w)
+        y = F.conv2d(x, weight=combined_weights, bias=None, stride=self.stride, dilation=self.dilation,
+                     padding=autopad(self.kernel_size, d=self.dilation), groups=self.groups * b)
         # (1, b * out_chans, h, w) -> (b, out_chans, h, w)
         y = y.view(b, self.out_chans, y.size(-2), y.size(-1))
         y = self.bn(y)

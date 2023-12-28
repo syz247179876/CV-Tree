@@ -14,55 +14,46 @@ scales: # model compound scaling constants, i.e. 'model=yolov8n.yaml' will call 
   l: [1.00, 1.00, 512]   # YOLOv8l summary: 365 layers, 43691520 parameters, 43691504 gradients, 165.7 GFLOPs
   x: [1.00, 1.25, 512]   # YOLOv8x summary: 365 layers, 68229648 parameters, 68229632 gradients, 258.5 GFLOPs
 
-# depth containing all layers of backbone and neck
-depths: [3, 6, 6, 3, 3, 3, 3, 3]
-
-drop_path_ratios: 0.1
-
-mlp_ratio: 2.
-
-use_layer_scale: true
-
-layer_scale_init_value: 1e-5
-
-pconv_fw_type: split_cat
-
 # YOLOv8.0n backbone
 backbone:
   # [from, repeats, module, args]
-  - [-1, 1, Conv, [64, 3, 2,]]  # 0-P1/2
+  - [-1, 1, Conv, [64, 3, 2]]  # 0-P1/2
   - [-1, 1, Conv, [128, 3, 2]]  # 1-P2/4
-  - [-1, 3, FasterBlocks, [128, 0, 2]]
+  - [-1, 3, C2f, [128, True]]
   - [-1, 1, Conv, [256, 3, 2]]  # 3-P3/8
-  - [-1, 6, FasterBlocks, [256, 1, 2]]
-  - [-1, 1, Conv, [512, 3, 2]]  # 5-P4/16
-  - [-1, 6, FasterBlocks, [512, 2, 4]]
-  - [-1, 1, Conv, [1024, 3, 2]]  # 7-P5/32
-  - [-1, 3, FasterBlocks, [1024, 3, 4]]
-  - [-1, 1, SPPF, [1024, 5]]  # 9
+  - [-1, 6, C2f, [256, True]]
+  - [-1, 1, ECA, []]
+  - [-1, 1, Conv, [512, 3, 2]]  # 6-P4/16
+  - [-1, 6, C2f, [512, True]]
+  - [-1, 1, ECA, []]
+  - [-1, 1, Conv, [1024, 3, 2]]  # 9-P5/32
+  - [-1, 3, C2f, [1024, True]]
+  - [-1, 1, ECA, []]
+  - [-1, 1, SPPF, [1024, 5]]  # 12
+  - [-1, 1, ECA, []]
 
 # YOLOv8.0n head
 head:
   - [-1, 1, nn.Upsample, [None, 2, 'nearest']]
-  - [[-1, 6], 1, Concat, [1]]  # cat backbone P4
+  - [[-1, 8], 1, Concat, [1]]  # cat backbone P4
   # 这里的3表示c2f中重复的Bottleneck个数
-  - [-1, 3, C2f, [512]]  # 12
-  - [-1, 1, SEBlock, [16, 'conv']]  # SE Block
+  - [-1, 3, C2f, [512]]  # 16
+  - [-1, 1, ECA, []]
 
   - [-1, 1, nn.Upsample, [None, 2, 'nearest']]
-  - [[-1, 4], 1, Concat, [1]]  # cat backbone P3
-  - [-1, 3, C2f, [256]]  # 16 (P3/8-small)
-  - [-1, 1, SEBlock, [16, 'conv']]  # SE Block
+  - [[-1, 5], 1, Concat, [1]]  # cat backbone P3
+  - [-1, 3, C2f, [256]]  # 20 (P3/8-small)
+  - [-1, 1, ECA, []]
 
   - [-1, 1, Conv, [256, 3, 2]]
-  - [[-1, 13], 1, Concat, [1]]  # cat head P4
-  - [-1, 3, C2f, [512]]  # 19 (P4/16-medium)
-  - [-1, 1, SEBlock, [16, 'conv']]  # SE Block
+  - [[-1, 17], 1, Concat, [1]]  # cat head P4
+  - [-1, 3, C2f, [512]]  # 24 (P4/16-medium)
+  - [-1, 1, ECA, []]
 
   - [-1, 1, Conv, [512, 3, 2]]
-  - [[-1, 9], 1, Concat, [1]]  # cat head P5
-  - [-1, 3, C2f, [1024]]  # 22 (P5/32-large)
-  - [-1, 1, SEBlock, [16, 'conv']]  # SE Block
+  - [[-1, 13], 1, Concat, [1]]  # cat head P5
+  - [-1, 3, C2f, [1024]]  # 28 (P5/32-large)
+  - [-1, 1, ECA, []]
 
   # 解耦头
-  - [[17, 21, 25], 1, Detect, [nc]]  # Detect(P3, P4, P5)
+  - [[21, 25, 29], 1, Detect, [nc]]  # Detect(P3, P4, P5)

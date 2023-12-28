@@ -1,7 +1,7 @@
 import os
 import time
 import warnings
-from functools import wraps
+from pathlib import Path
 
 import onnx
 import torch
@@ -10,13 +10,19 @@ import onnxruntime as ort
 import psutil
 import cv2
 import typing as t
+import yaml
 import torch.nn as nn
 
 from collections import OrderedDict, namedtuple
+from functools import wraps
+from ultralytics import YOLO
 from wraps import log_wrap
-from ultralytics.utils import TQDM
+from ultralytics.utils import TQDM, yaml_load, DATASETS_DIR
 
 __all__ = ['check_inference_result', 'export_onnx', 'export_engine', 'infer_on_engine']
+
+# project root path
+ROOT = os.path.dirname(os.path.dirname(__file__))
 
 onnx_storage = rf'{os.path.dirname(__file__)}\onnx_storage'
 pt_storage = rf'{os.path.dirname(__file__)}\pt_storage'
@@ -260,7 +266,11 @@ def check_inference_result(
     ],[
         'compared result:',
         f'[pytorch -- onnx] max diff: {torch.max(torch.abs(pt_res - onnx_res))}',
+        f'[pytorch -- onnx] min diff: {torch.min(torch.abs(pt_res - onnx_res))}',
+        f'[pytorch -- onnx] avg diff: {torch.mean(torch.abs(pt_res - onnx_res))}',
         f'[pytorch -- tensorrt] max diff: {torch.max(torch.abs(pt_res - engine_res))}',
+        f'[pytorch -- tensorrt] min diff: {torch.min(torch.abs(pt_res - engine_res))}',
+        f'[pytorch -- tensorrt] avg diff: {torch.mean(torch.abs(pt_res - engine_res))}',
         'compared finished'
     ]
 
@@ -589,3 +599,56 @@ def infer_on_engine(
         )
 
     return res
+
+
+class TestValModel(object):
+    """
+    test and validate model in test dataset without data augmentation
+    """
+
+    def __init__(
+            self,
+            model_file: str,
+            dataset_yaml: str,
+            mode: str = 'test'
+    ):
+        super(TestValModel, self).__init__()
+        self.model_file = model_file
+        self.model = YOLO(model_file)
+        self.dataset_yaml = dataset_yaml
+        self.data_path = rf'{ROOT}\ultralytics\cfg\datasets\{dataset_yaml}'
+        self.mode = mode
+
+    @property
+    def dataset_paths(self) -> t.Union[t.List[str], str]:
+        """
+        Parse the absolute path of its test dataset based on the yaml file
+        """
+        cfg = yaml_load(self.data_path)
+        path = (DATASETS_DIR / Path(cfg.get('path'))).resolve()
+        dir_paths = []
+        if self.mode == 'test':
+            dir_paths = [path / Path(t) for t in cfg.get('test')]
+        elif self.mode == 'val':
+            dir_paths = [path / Path(v) for v in cfg.get('val')]
+        return dir_paths
+    def __call__(self, *args, **kwargs):
+        if self.mode == 'val':
+            for path in self.dataset_paths:
+                metrics = self.model.val(visualize=True)
+                map = metrics.box.map  # map50-95
+                map50 = metrics.box.map50  # map50
+                map75 = metrics.box.map75  # map75
+                maps = metrics.box.maps  # 包含每个类别的map50-95列表
+                print(map, map50, map75)
+        elif self.mode == 'test':
+            for path in self.dataset_paths:
+                res = self.model(path)
+                boxes = res.boxes
+                probs = res.probs
+
+
+
+if __name__ == '__main__':
+    t = TestValModel(r'C:\yolov8\runs\detect\train-VOC2.yaml-PConv2\weights\last.pt', 'VOC2.yaml', 'val')
+    t()

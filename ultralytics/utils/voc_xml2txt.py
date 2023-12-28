@@ -32,9 +32,12 @@ def convert_annotation(xmlpath, xmlname):
         txtfile = os.path.join(txtpath, txtname)
         tree = ET.parse(in_file)
         root = tree.getroot()
+        size = root.find('size')
         filename = root.find('filename')
-        img = cv2.imdecode(np.fromfile('{}/{}.{}'.format(imgpath, xmlname[:-4], postfix), np.uint8), cv2.IMREAD_COLOR)
-        h, w = img.shape[:2]
+        w = int(size.find('width').text)
+        h = int(size.find('height').text)
+        # img = cv2.imdecode(np.fromfile('{}/{}.{}'.format(imgpath, xmlname[:-4], postfix), np.uint8), cv2.IMREAD_COLOR)
+        # h, w = img.shape[:2]
         res = []
         for obj in root.iter('object'):
             cls = obj.find('name').text

@@ -27,7 +27,7 @@ from .transformer import (AIFI, MLP, DeformableTransformerDecoder, DeformableTra
                           MLPBlock, MSDeformAttn, TransformerBlock, TransformerEncoderLayer, TransformerLayer)
 from .FasterNet import FasterNet, FasterNetBlock, PatchEmbedding, PatchMerging, BasicStage as FasterBasicStage
 from .MobileViT import MobileViTBlock, MV2Block
-
+from .PoolFormer import PoolFormerBlocks, PatchEmbedding as PoolEmbedding
 __all__ = ('Conv', 'Conv2', 'LightConv', 'RepConv', 'DWConv', 'DWConvTranspose2d', 'ConvTranspose', 'Focus',
            'GhostConv', 'ChannelAttention', 'SpatialAttention', 'CBAM', 'Concat', 'TransformerLayer',
            'TransformerBlock', 'MLPBlock', 'LayerNorm2d', 'DFL', 'HGBlock', 'HGStem', 'SPP', 'SPPF', 'C1', 'C2', 'C3',
@@ -37,5 +37,5 @@ __all__ = ('Conv', 'Conv2', 'LightConv', 'RepConv', 'DWConv', 'DWConvTranspose2d
            'ConvOD', 'ODConv', 'C2fOD', 'BottleneckOD', 'CABlock', 'FasterNet', 'C2fFaster',
            'FasterNetBlock', 'PatchEmbedding', 'PatchMerging', 'FasterBasicStage', 'SKBlock', 'SEBlock', 'C2fBoT',
            'MobileViTBlock', 'MV2Block', 'AFPNC2f', 'AFPNPConv', 'PConv', 'FasterBlocks', 'CondConv',
-           'C2fCondConv', 'CPCA', 'ECA'
+           'C2fCondConv', 'CPCA', 'ECA', 'PoolEmbedding', 'PoolFormerBlocks'
            )

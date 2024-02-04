@@ -8,7 +8,6 @@ from .EfficientFormer import (Stem as EfficientFormerStem, MetaBlock as EFMetaBl
                               )
 
 from .CloFormer import (PatchEmbedding as CloFormerStem, CloLayer, CloBlock, LightStem as CloFormerLightStem)
-from .PoolFormer import (PatchEmbedding as PoolEmbedding, PoolFormerBlocks)
 
 __all__ = [
     # BiFormer
@@ -36,7 +35,4 @@ __all__ = [
     'CloBlock',
     'CloFormerLightStem',
 
-    # PoolFormer
-    'PoolEmbedding',
-    'PoolFormerBlocks'
 ]

@@ -3,10 +3,12 @@ import torch.nn as nn
 import typing as t
 import torch.nn.functional as F
 from ultralytics.nn.modules import Conv
+from ultralytics.nn.modules.conv import autopad
 from einops import rearrange
 
 
-__all__ = ['MV2Block', 'MobileViTBlock']
+__all__ = ['MV2Block', 'MobileViTBlock', 'MVConv']
+
 
 
 def drop_path(x: torch.Tensor, drop_prob: float = 0., training: bool = False) -> torch.Tensor:
@@ -46,33 +48,24 @@ class DropPath(nn.Module):
         return drop_path(x, self.drop_prob, self.training)
 
 
-# class Conv(nn.Module):
-#     """
-#     Basic Conv includes Conv2d(1x1 or 3x3), BN, Relu
-#     """
-#
-#     def __init__(
-#             self,
-#             in_chans: int,
-#             out_chans: int,
-#             kernel_size: int = 3,
-#             stride: int = 1,
-#             groups: int = 1,
-#             norm_layer: t.Optional[t.Callable] = None,
-#             act_layer: t.Optional[t.Callable] = None,
-#     ):
-#         super(Conv, self).__init__()
-#         if norm_layer is None:
-#             norm_layer = nn.BatchNorm2d
-#         if act_layer is None:
-#             act_layer = nn.ReLU
-#         self.conv = nn.Conv2d(in_chans, out_chans, kernel_size, stride,
-#                               padding=1 if kernel_size == 3 else 0, groups=groups, bias=False)
-#         self.bn = norm_layer(out_chans)
-#         self.act = act_layer(inplace=True)
-#
-#     def forward(self, x: torch.Tensor):
-#         return self.act(self.bn(self.conv(x)))
+class MVConv(nn.Module):
+    """Standard convolution with args(ch_in, ch_out, kernel, stride, padding, groups, dilation, activation)."""
+    default_act = nn.SiLU()  # default activation
+
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
+        """Initialize Conv layer with given arguments including activation."""
+        super().__init__()
+        self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+
+    def forward(self, x):
+        """Apply convolution, batch normalization and activation to input tensor."""
+        return self.act(self.bn(self.conv(x)))
+
+    def forward_fuse(self, x):
+        """Perform transposed convolution of 2D data."""
+        return self.act(self.conv(x))
 
 
 class MLP(nn.Module):

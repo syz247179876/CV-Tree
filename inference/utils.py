@@ -342,7 +342,8 @@ def batchmark_common(
         f'---test shape {shape[2]}x{shape[3]} on {device}, fuse: {fuse}, dtype: {dtype}'
     ],[
         f'input shape: {shape}',
-        f'average time of each batch: {np.mean(run_times)}ms\n'
+        f'average time of each batch: {np.mean(run_times)} ms / img \n',
+        f'fps:  {1000 / np.mean(run_times): .1f} img / s',
         'batchmark Pytorch successfully',
     ]
 
@@ -412,12 +413,13 @@ def batchmark_onnx(
 
     run_times = iterative_sigma_clipping(np.array(run_times), sigma=2, max_iters=3)  # sigma clipping
     return [
-       'starting batchmark ONNX...',
-       f'---test shape {shape[2]}x{shape[3]} on {device}, fused, dtype: {input_dtype}'
+        'starting batchmark ONNX...',
+        f'---test shape {shape[2]}x{shape[3]} on {device}, fused, dtype: {input_dtype}'
     ], [
-       f'input shape: {shape}',
-       f'average time of each batch: {np.mean(run_times)}ms\n'
-       'batchmark ONNX successfully',
+        f'input shape: {shape}',
+        f'average time of each batch: {np.mean(run_times)} ms / img \n',
+        f'fps:  {1000 / np.mean(run_times): .1f} img / s',
+        'batchmark ONNX successfully',
     ]
 
 @log_wrap(stream='file')
@@ -552,12 +554,13 @@ def batchmark_engine(
 
     run_times = iterative_sigma_clipping(np.array(run_times), sigma=2, max_iters=3)  # sigma clipping
     return [
-       'starting batchmark TensorRT...',
-       f'---test shape {shape[2]}x{shape[3]} on {device}, fused, dtype: {dtype}'
+        'starting batchmark TensorRT...',
+        f'---test shape {shape[2]}x{shape[3]} on {device}, fused, dtype: {dtype}'
     ], [
-       f'input shape: {shape}',
-       f'average time of each batch: {np.mean(run_times)}ms\n'
-       'batchmark TensorRT successfully',
+        f'input shape: {shape}',
+        f'average time of each batch: {np.mean(run_times)} ms / img \n',
+        f'fps:  {1000 / np.mean(run_times): .1f} img / s',
+        'batchmark TensorRT successfully',
     ]
 
 @log_wrap(stream='file')
@@ -640,7 +643,8 @@ class TestValModel(object):
                 map50 = metrics.box.map50  # map50
                 map75 = metrics.box.map75  # map75
                 maps = metrics.box.maps  # 包含每个类别的map50-95列表
-                print(map, map50, map75)
+
+                print(map, map50, map75, maps)
         elif self.mode == 'test':
             for path in self.dataset_paths:
                 res = self.model(path)
@@ -650,5 +654,5 @@ class TestValModel(object):
 
 
 if __name__ == '__main__':
-    t = TestValModel(r'C:\yolov8\runs\detect\train-VOC2.yaml-PConv2\weights\last.pt', 'VOC2.yaml', 'val')
+    t = TestValModel(r'C:\yolov8\runs\detect\train-FLIR-ADAS-V2.yaml-FasterNet-V0-16\weights\best.pt', 'FLIR-ADAS-V2.yaml', 'val')
     t()

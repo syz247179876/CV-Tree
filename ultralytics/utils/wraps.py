@@ -13,7 +13,7 @@ __all__ = ['log_profile' ]
 def log_profile(
         mode: str,
         shape: t.Tuple = (3, 640, 640),
-        batch_size: int = 2,
+        batch_size: int = 1,
         show_detail: bool = False,
 ):
     """
@@ -36,7 +36,7 @@ def log_profile(
                 summary(m, shape, batch_size=batch_size, device=device)
 
             if show_detail:
-                _x = torch.randn(2, *shape, device=device)
+                _x = torch.randn(batch_size, *shape, device=device)
                 yp(_x, m, n=6)  # profile over 100 iterations
             return model
         return inner

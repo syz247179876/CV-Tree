@@ -12,14 +12,19 @@ from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottlenec
                                     Classify, Concat, Conv, Conv2, ConvTranspose, Detect, DWConv, DWConvTranspose2d,
                                     Focus, GhostBottleneck, GhostConv, HGBlock, HGStem, Pose, RepC3, RepConv,
                                     RTDETRDecoder, Segment, ConvOD, C2fOD, BottleneckOD, CABlock, FasterNet, C2fFaster,
-                                    PatchMerging, PatchEmbedding, FasterBasicStage, SKBlock, SEBlock, C2fBoT,
+                                    PatchMerging, FasterEmbedding, FasterBasicStage, SKBlock, SEBlock, C2fBoT,
                                     MobileViTBlock, MV2Block, AFPNC2f, AFPNPConv, PConv, FasterBlocks, CondConv,
-                                    C2fCondConv, CPCA, ECA
+                                    C2fCondConv, CPCA, ECA, SimAM, EMA, SPPFAvgAttn, RepStem, RepStemDWC, RepConv1x1,
+                                    ConcatBiFPN, BiCrossFPN, ConcatBiDirectFPN, GhostConvV2, C2fGhostV2, MAConv,
+                                    EnhancedConcat, RepMAConv, MVConv, LightConv2, LightBlocks, MV3Block, SPPCA,
+                                    PoolFormerBlocks, PoolEmbedding
                                     )
 from ultralytics.nn.attention import (BiLevelRoutingAttention, BiFormerBlock, EfficientViTBlock, EfficientViTPE,
                                       EfficientViTPM, EfficientViTPES, EfficientViTPESS, EfficientViTCB,
                                       EfficientFormerStem, EFMetaBlock, EfficientFormerPM, EfficientFormerCB,
-                                      CloFormerStem, CloLayer, CloBlock, CloFormerLightStem
+                                      CloFormerStem, CloLayer, CloBlock, CloFormerLightStem, CloFormerRepStem,
+                                      CBTokenMixer, CBConvFFN, BRABlock, EfficientViTBlocks, BiStem, BiPatchMerging,
+                                      BiFormerBlocks
                                       )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -89,7 +94,7 @@ class BaseModel(nn.Module):
             # m.i表示yaml中当前模块m所在层数
 
             # 特殊处理AFPN后的detect
-            if isinstance(m.f, list) and m.f == [-3, -2, -1]:
+            if isinstance(m.f, list) and all([l_ < 0 for l_ in m.f]):
                 x = y[m.f] if isinstance(m.f, int) else [y[j] for j in m.f]
             elif m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -97,7 +102,7 @@ class BaseModel(nn.Module):
             if profile:
                 self._profile_one_layer(m, x, dt, _flops, _params)
             x = m(x)  # run
-            if isinstance(m, (AFPNC2f, AFPNPConv, )):
+            if isinstance(m, (AFPNC2f, AFPNPConv, BiCrossFPN)):
                 y.extend([x_ for x_ in x])
             else:
                 y.append(x if m.i in self.save else None)  # save output
@@ -149,7 +154,7 @@ class BaseModel(nn.Module):
         """
         if not self.is_fused():
             for m in self.model.modules():
-                if isinstance(m, (Conv, Conv2, DWConv)) and hasattr(m, 'bn'):
+                if isinstance(m, (Conv, Conv2, DWConv, MVConv)) and hasattr(m, 'bn'):
                     if isinstance(m, Conv2):
                         m.fuse_convs()
                     m.conv = fuse_conv_and_bn(m.conv, m.bn)  # update conv
@@ -159,7 +164,7 @@ class BaseModel(nn.Module):
                     m.conv_transpose = fuse_deconv_and_bn(m.conv_transpose, m.bn)
                     delattr(m, 'bn')  # remove batchnorm
                     m.forward = m.forward_fuse  # update forward
-                if isinstance(m, RepConv):
+                if isinstance(m, (RepConv, RepConv1x1)):
                     m.fuse_convs()
                     m.forward = m.forward_fuse  # update forward
                 # 自定义Conv2dBN融合方式
@@ -725,18 +730,35 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
         if m in (Classify, Conv, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, DWConv, Focus,
                  BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x, RepC3,
-                 ConvOD, C2fOD, BottleneckOD, C2fFaster, C2fBoT, BiFormerBlock, PConv, CondConv, C2fCondConv):
+                 ConvOD, C2fOD, BottleneckOD, C2fFaster, C2fBoT, BiFormerBlock, PConv, CondConv, C2fCondConv, BRABlock,
+                 SPPFAvgAttn, RepStem, RepStemDWC, GhostConvV2, C2fGhostV2, MAConv, RepMAConv, LightConv2,
+                 LightBlocks, SPPCA):
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
 
             args = [c1, c2, *args[1:]]
             if m in (BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, C3x, RepC3, C2fFaster, C2fBoT, C2fOD, CondConv,
-                     C2fCondConv
+                     C2fCondConv, C2fGhostV2, LightBlocks
                      ):
                 args.insert(2, n)  # number of repeats
                 n = 1
-        elif m is PatchEmbedding:
+        elif m is BiFormerBlocks:
+            c1, c2 = ch[f], args[0]
+            drop_path = d.get('drop_path')
+            kv_downsample_ratio = d.get('kv_downsample_ratio')
+            n_win = d.get('n_win')
+            side_dwconv = d.get('side_dwconv')
+            num_heads = args[1]
+            top_k = args[2]
+            n = args[3]
+            args = [c1, c2, n, num_heads, n_win, top_k, kv_downsample_ratio, side_dwconv, drop_path]
+            n = 1
+
+        elif m in (MVConv, ):
+            c1, c2 = ch[f], args[0]
+            args = [c1, c2, *args[1:]]
+        elif m is FasterEmbedding:
             # used in FasterNet
             v = int(d.get('FasterNet_scale')) if d.get('FasterNet_scale') in ['0', '1', '2'] else d.get('FasterNet_scale')
             embed_dim = d.get('embed_dim')[v]
@@ -760,7 +782,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 raise NotImplementedError
             args = [c1, depths[cur_stage_layer], dpr[sum(depths[: cur_stage_layer]): sum(depths[: cur_stage_layer + 1])],
             act_layer, *args[1: ]]
-
+        elif m is BiPatchMerging:
+            c1, c2 = ch[f], args[0]
+            args = [c1, c2, *args[1:]]
         elif m is PatchMerging:
             # used in PatchMerging
             v = int(d.get('FasterNet_scale')) if d.get('FasterNet_scale') in ['0', '1', '2'] else d.get('FasterNet_scale')
@@ -779,7 +803,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 
         elif m is nn.BatchNorm2d:
             args = [ch[f]]
-        elif m is Concat:
+        elif m in (Concat, ConcatBiFPN, ConcatBiDirectFPN, EnhancedConcat):
             c2 = sum(ch[x] for x in f)
         elif m in (Detect, Segment, Pose):
             args.append([ch[x] for x in f])
@@ -790,6 +814,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 
         elif m in (CABlock, SEBlock, SKBlock):
             args = [ch[f], ch[f], *args]
+            c2 = ch[f]
+
+        elif m in (SimAM, EMA):
+            args = [ch[f], *args]
             c2 = ch[f]
 
         elif m is FasterNet:
@@ -809,6 +837,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c1, c2 = ch[f], make_divisible(args[0] * width_m, 8)
             args = [c1, c2, temp_n, *args[1:]]
             n = 1
+
+        elif m is MV3Block:
+            c1, c2 = ch[f], args[0]
+            args[-2] = build_act(args[-2])
+            args = [c1, c2, *args[1:]]
 
         elif m is MobileViTBlock:
             kernel_size, head_num, mlp_ratio, patch_size, auto_pad = d.get('kernel_size'), d.get('head_num'), \
@@ -845,7 +878,17 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c1, args[1], args[2], args[3], args[4], resolution, kernels, multi_v, hidden_ratio, act_layer]
             resolutions.append(resolution)
 
-        elif m in (AFPNC2f, AFPNPConv):
+        elif m is EfficientViTBlocks:
+            act_layer = build_act(d.get('act_layer'))
+            c1, c2 = ch[f], args[0]
+            kernels = d.get('token_kernels')
+            multi_v = c1 / (args[3] * args[4])
+            resolution = resolutions[args[6]]
+            hidden_ratio = d.get('hidden_ratio')
+            args = [args[1], c1, args[2], args[3], args[4], args[5], resolution, kernels, multi_v, hidden_ratio, act_layer]
+            resolutions.append(resolution)
+
+        elif m in (AFPNC2f, AFPNPConv, BiCrossFPN):
             act_layer = build_act(args[1])
             args = [[ch[x] for x in f], args[0], act_layer, args[2], *args[3:]]
             fuse_ch = [ch[x] for x in f]
@@ -874,7 +917,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             use_layer_scale = d.get('use_layer_scale', True),
             layer_scale_init_value = eval(d.get('layer_scale_init_value', '1e-5'))
             vit_num = d.get('vit_num')
-            multi_v = max(c1 / (q_k_dim * num_head), 1.0)
+            # multi_v = max(c1 / (q_k_dim * num_head), 1.0)
+            multi_v = d.get('multi_v', 4.)
             args = [c1, args[0], depths, multi_v, num_head, q_k_dim, pool_size, mlp_ratio, act_layer, norm_layer,
                     drop_ratio, drop_path_ratio, use_layer_scale, layer_scale_init_value, vit_num]
 
@@ -894,7 +938,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                     use_layer_scale, layer_scale_init_value, pconv_fw_type]
             n = 1
 
-        elif m in (CloFormerStem,  CloFormerLightStem):
+        elif m in (CloFormerStem,  CloFormerLightStem, CloFormerRepStem, BiStem):
             c1, c2 = ch[f], args[0]
             args = [c1, c2]
 
@@ -902,7 +946,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c1, c2 = ch[f], args[0]
             i_stage = args[1]
             downsample = args.pop()
-            use_se = d.get('use_se', False)
+            use_attn = args.pop()
             depths = d.get('depths')
             attn_drop = d.get('attn_drop', 0.)
             mlp_drop = d.get('mlp_drop', 0.)
@@ -910,12 +954,12 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             qkv_bias = d.get('qkv_bias', False)
             dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
             args = [c1, c2, n, *args[2: ], attn_drop, mlp_drop, dpr[sum(depths[: i_stage]): sum(depths[: i_stage + 1])],
-                    qkv_bias, use_se, downsample]
+                    qkv_bias, use_attn, downsample]
             n = 1
-        elif m is CloBlock:
+        elif m in (CloBlock, CBTokenMixer):
             c1, c2 = ch[f], args[0]
             i_stage = args[1]
-            use_se = d.get('use_se', False)
+            use_attn = args.pop()
             depths = d.get('depths')
             attn_drop = d.get('attn_drop', 0.)
             mlp_drop = d.get('mlp_drop', 0.)
@@ -923,12 +967,42 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             qkv_bias = d.get('qkv_bias', False)
             dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
             args = [c1, c2, *args[2:], attn_drop, mlp_drop, dpr[sum(depths[: i_stage])],
-                    qkv_bias, use_se]
+                    qkv_bias, use_attn]
+
+        elif m is CBConvFFN:
+            c1, c2 = ch[f], args[0]
+            i_stage = args[1]
+            depths = d.get('depths')
+            mlp_drop = d.get('mlp_drop', 0.)
+            drop_path_rate = d.get('drop_path_rate', 0.)
+            dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
+            args = [c1, c2, *args[2:], mlp_drop, dpr[sum(depths[: i_stage])]]
+
 
         elif m in [CPCA, ECA]:
             c1, c2 = ch[f], ch[f]
             args = [c1, *args]
 
+        elif m is PoolEmbedding:
+            c1, c2 = ch[f], args[0]
+            args = [c1, c2, *args[1: ]]
+
+        elif m is PoolFormerBlocks:
+            c1, c2 = ch[f], ch[f]
+            i_stage = args[0]
+            depths = d.get('depths')
+            mlp_ratio = d.get('mlp_ratio', 4)
+            pool_size = d.get('pool_size', 3)
+            drop_ratio = d.get('drop_ratio', 0.)
+            drop_path_ratio = d.get('drop_path_ratio', 0.)
+            use_layer_scale = d.get('use_layer_scale', False)
+            layer_scale_init_value = eval(d.get('layer_scale_init_value', '1e-5'))
+            act_layer = build_act(d.get('act_layer'))
+            dpr = [x.item() for x in torch.linspace(0, drop_path_ratio, sum(depths))]
+            args = [c1, depths[i_stage], pool_size, mlp_ratio, drop_ratio,
+                    dpr[sum(depths[: i_stage]): sum(depths[: i_stage + 1])], use_layer_scale,
+                    layer_scale_init_value, act_layer]
+            n = 1
         else:
             c2 = ch[f]
 
@@ -944,7 +1018,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             ch = []
         if m in (FasterNet, ):
             ch.extend(backbone_ch)
-        elif m in (AFPNC2f, AFPNPConv):
+        elif m in (AFPNC2f, AFPNPConv, BiCrossFPN):
             ch.extend(fuse_ch)
         else:
             ch.append(c2)

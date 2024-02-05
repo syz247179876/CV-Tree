@@ -12,7 +12,7 @@ from ultralytics.nn.modules.utils import auto_pad
 # Official source code: https://github.com/microsoft/Cream/blob/main/EfficientViT/classification/model/efficientvit.py
 
 __all__ = ['efficientvit', 'PatchMerging', 'PatchEmbed', 'EfficientViTBlock', 'EfficientViT', 'PatchEmbedSmall',
-           'PatchEmbedSmaller', 'Conv2dBN']
+           'PatchEmbedSmaller', 'Conv2dBN', 'EfficientViTBlocks']
 
 
 def drop_path(x: torch.Tensor, drop_prob: float = 0., training: bool = False) -> torch.Tensor:
@@ -77,7 +77,7 @@ class Conv2dBN(torch.nn.Sequential):
             (bn.running_var + bn.eps) ** 0.5
         m = torch.nn.Conv2d(w.size(1) * self.c.groups, w.size(
             0), w.shape[2:], stride=self.c.stride, padding=self.c.padding, dilation=self.c.dilation,
-                            groups=self.c.groups)
+                            groups=self.c.groups, device=w.device, dtype=w.dtype)
         m.weight.data.copy_(w)
         m.bias.data.copy_(b)
         return m
@@ -547,6 +547,43 @@ class EfficientViTBlock(nn.Module):
         x = self.ffn1(self.dwc1(x))
         return x
 
+
+class EfficientViTBlocks(nn.Module):
+
+    def __init__(
+            self,
+            depth: int,
+            embed_dim: int,
+            stage_mode: str,
+            q_k_dim: int,
+            num_head: int,
+            window_resolution: int,
+            resolution: int,
+            kernels: t.List,
+            multi_v: float,
+            hidden_ratio: int = 2,
+            act_layer: t.Optional[t.Callable] = None
+    ):
+        super(EfficientViTBlocks, self).__init__()
+        self.blocks = nn.ModuleList([
+            EfficientViTBlock(
+                embed_dim=embed_dim,
+                stage_mode=stage_mode,
+                q_k_dim=q_k_dim,
+                num_head=num_head,
+                window_resolution=window_resolution,
+                resolution=resolution,
+                kernels=kernels,
+                multi_v=multi_v,
+                hidden_ratio=hidden_ratio,
+                act_layer=act_layer,
+            )
+         for _ in range(depth)])
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for block in self.blocks:
+            x = block(x)
+        return x
 
 class PatchMerging(nn.Module):
     """

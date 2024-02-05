@@ -13,4 +13,4 @@ def get_model(model: str, device: str = 'cuda'):
 
 if __name__ == '__main__':
     model = get_model('yolov8-MobileViT-XS.yaml')
-    model.train(data=DATASET_EXDARK, epochs=300, batch=32, lr0=0.01, name=f'train-{DATASET_EXDARK}-baseline-pretrained')
+    # model.train(data=DATASET_EXDARK, epochs=300, batch=32, lr0=0.01, name=f'train-{DATASET_EXDARK}-baseline-pretrained')

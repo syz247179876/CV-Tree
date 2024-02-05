@@ -11,5 +11,5 @@ def get_model(model: str, device: str = 'cuda'):
     return model
 
 if __name__ == '__main__':
-    model = get_model('yolov8n-PConv-SE.yaml')
-    model.train(data=DATASET_VOC, epochs=300, batch=32, lr0=0.01, name=f'train-{DATASET_VOC}-PConv')
+    model = get_model('yolov8n-FasterBlock.yaml')
+    # model.train(data=DATASET_VOC, epochs=300, batch=32, lr0=0.01, name=f'train-{DATASET_VOC}-PConv')

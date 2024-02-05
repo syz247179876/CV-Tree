@@ -10,12 +10,17 @@ import typing as t
 
 from math import log
 from timm.layers import DropPath
+from timm.models.senet import SEModule
 
-from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, ConvOD, PartialConv, PConv, CondConv
+from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, ConvOD, PartialConv, PConv, CondConv, RepConv1x1, \
+    LightConv2
 from .transformer import TransformerBlock
+
 __all__ = ('DFL', 'HGBlock', 'HGStem', 'SPP', 'SPPF', 'C1', 'C2', 'C3', 'C2f', 'C2fOD', 'C3x', 'C3TR', 'C3Ghost',
            'GhostBottleneck', 'Bottleneck', 'BottleneckCSP', 'BottleneckOD', 'Proto', 'RepC3', 'CABlock', 'C2fFaster',
-           'SEBlock', 'SKBlock', 'C2fBoT', 'AFPNC2f', 'AFPNPConv', 'FasterBlocks', 'C2fCondConv', 'CPCA', 'ECA')
+           'SEBlock', 'SKBlock', 'C2fBoT', 'AFPNC2f', 'AFPNPConv', 'FasterBlocks', 'C2fCondConv', 'CPCA', 'ECA',
+           'SimAM', 'EMA', 'SPPFAvgAttn', 'RepStem', 'RepStemDWC', 'BiCrossFPN', 'C2fGhostV2', 'GhostConvV2',
+           'LightBlocks', 'SPPCA')
 
 
 class DFL(nn.Module):
@@ -154,6 +159,44 @@ class SPPF(nn.Module):
         y2 = self.m(y1)
         return self.cv2(torch.cat((x, y1, y2, self.m(y2)), 1))
 
+class SPPFAvgAttn(nn.Module):
+
+    def __init__(self, c1, c2, k=5, mlp_ratio: int = 2):
+        """
+        Initializes the SPPF layer with given input/output channels and kernel size.
+
+        This module is equivalent to SPP(k=(5, 9, 13)).
+        针对小目标检测，减少卷积核大小，更侧重于局部信息的提取, 因此k初始设定为3, k = (3, 5, 7)
+        避免产生过大的感受野, 如果感受野过大, 导致特征图中某一块区域内非目标特征占比过大, 会影响检测结果
+        """
+        super().__init__()
+        c_ = c1 // 2  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.max = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
+        self.avg = nn.AvgPool2d(kernel_size=k, stride=1, padding=k // 2)
+        self.rep_dwc = RepConv(c_ * 4, c_ * 4, k=3, g=c_ * 4, act=True)
+        self.attn = ECA(c_ * 4)
+        self.cv2 = Conv(c_ * 4, c2, k=1, act=True)
+        self.ffn = nn.Sequential(
+            nn.Conv2d(c2, c2 * mlp_ratio, 1, 1, 0, bias=True),
+            nn.GELU(),
+            nn.Conv2d(c2 * mlp_ratio, c2, 1, 1, 0, bias=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.cv1(x)
+        max_y1 = self.max(x)
+        avg_y1 = self.avg(x)
+        max_y2 = self.max(max_y1)
+        avg_y2 = self.avg(avg_y1)
+        out = self.rep_dwc(torch.cat((x, max_y1 + avg_y1, max_y2 + avg_y2, self.max(max_y2) + self.avg(avg_y2)), dim=1))
+        out = self.attn(out)
+        out = self.cv2(out)
+        # shortcut
+        out = out + self.ffn(out)
+        return out
+
+
 
 class C1(nn.Module):
     """CSP Bottleneck with 1 convolution."""
@@ -197,7 +240,6 @@ class C2f(nn.Module):
     集合CSPNet + VoVNet思想, 在ELAN基础上进一步改进，将ELAN中Conv块替换成Bottleneck
     """
 
-
     def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
         """Initialize CSP bottleneck layer with two convolutions with arguments ch_in, ch_out, number, shortcut, groups,
         expansion.
@@ -224,10 +266,79 @@ class C2f(nn.Module):
         return self.cv2(torch.cat(y, 1))
 
 
+class GhostConvV2(nn.Module):
+    """
+    Ghost Block V2 with DFC attention
+    """
+
+    def __init__(
+            self,
+            in_chans: int,
+            out_chans: int,
+            kernel_size: int = 1,
+            stride: int = 1,
+            group: int = 1,
+            ratio: int = 2,
+            dw_size: int = 3,
+            act_layer: t.Optional[t.Union[nn.Module, t.Callable]] = None
+    ):
+        super(GhostConvV2, self).__init__()
+        if act_layer is None:
+            act_layer = nn.ReLU
+        # self.avgpool2d = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.gate_fn = nn.Sigmoid()
+        init_chans = math.ceil(out_chans / ratio)
+        new_chans = init_chans * (ratio - 1)
+        self.primary_conv = Conv(in_chans, init_chans, k=kernel_size, s=stride, g=group, act=act_layer(inplace=True))
+        self.cheap_ops = Conv(init_chans, new_chans, k=dw_size, s=1, g=init_chans, act=nn.ReLU(inplace=True))
+        self.short_conv = nn.Sequential(
+            Conv(in_chans, out_chans, k=kernel_size, s=1, act=False),
+            #ECA(out_chans),
+            Conv(out_chans, out_chans, k=(1, 5), s=1, p=(0, 2), g=out_chans, act=False),
+            Conv(out_chans, out_chans, k=(5, 1), s=1, p=(2, 0), g=out_chans, act=False),
+            # ECA(out_chans),
+        )
+        # self.up_sample = nn.Upsample(scale_factor=2, mode='bilinear')
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+        # attn = self.avgpool2d(x)
+        attn = self.short_conv(x)
+        attn = self.gate_fn(attn)
+        # attn = self.up_sample(attn)
+
+        x1 = self.primary_conv(x)
+        x2 = self.cheap_ops(x1)
+        out = torch.cat((x1, x2), dim=1)
+        out = out * attn
+        return out
+
+class C2fGhostV2(C2f):
+    """
+    Replace ordinary conv with GhostConv v2 on Bottleneck of C2f module
+    """
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            n: int = 1,
+            shortcut: bool = False,
+            g: int = 1,
+            e: float = 0.5,
+            ratio: int = 2,
+            dw_size: int = 3,
+    ):
+        super(C2fGhostV2, self).__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(
+            BottleneckGhostV2(self.c, self.c, shortcut, g, k=(1, 1), e=1.0, ratio=ratio, dw_size=dw_size)
+            for _ in range(n)
+        )
+
 class C2fOD(C2f):
     """
     Replace ordinary conv with ODConv on Bottleneck of C2f module
     """
+
     def __init__(
             self,
             c1: int,
@@ -265,6 +376,7 @@ class C2fFaster(C2f):
         super(C2fFaster, self).__init__(c1, c2, n, shortcut, g, e)
         self.m = nn.ModuleList(BottleneckFaster(self.c, self.c, shortcut, n_div, pconv_fw_type,
                                                 g, e=1.0) for _ in range(n))
+
 
 # class C2fPConv(nn.Module):
 #     """
@@ -410,11 +522,36 @@ class BottleneckCSP(nn.Module):
         y2 = self.cv2(x)
         return self.cv4(self.act(self.bn(torch.cat((y1, y2), 1))))
 
+class BottleneckGhostV2(nn.Module):
+    """
+    Bottleneck with GhostConv V2
+    """
+    
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            shortcut: bool = True,
+            g: int = 1,
+            k: t.Tuple = (1, 1),
+            e: float = 0.5,
+            ratio: int = 2,
+            dw_size: int = 3,
+        ):
+        super(BottleneckGhostV2, self).__init__()
+        c_ = int(c2 * e)
+        self.cv1 = GhostConvV2(c1, c_, k[0], 1, ratio=ratio, dw_size=dw_size)
+        self.cv2 = GhostConv(c_, c_, k[1], 1, g=g)
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
 
 class BottleneckOD(nn.Module):
     """
     Bottleneck with ODConv
     """
+
     def __init__(
             self,
             c1: int,
@@ -435,6 +572,7 @@ class BottleneckOD(nn.Module):
 
     def forward(self, x: torch.Tensor):
         return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
+
 
 class BottleneckFaster(nn.Module):
     """
@@ -518,7 +656,6 @@ class CABlock(nn.Module):
                 m.weight.data.normal_(0, math.sqrt(2. / n))
                 if m.bias is not None:
                     m.bias.data.zero_()
-
 
     def forward(self, x: torch.Tensor):
         identity = x
@@ -697,6 +834,31 @@ class SKBlock(nn.Module):
         return v
 
 
+class SimAM(torch.nn.Module):
+    def __init__(self, channels=None, e_lambda=1e-4):
+        super(SimAM, self).__init__()
+
+        self.act = nn.Sigmoid()
+        self.e_lambda = e_lambda
+
+    def __repr__(self):
+        s = self.__class__.__name__ + '('
+        s += ('lambda=%f)' % self.e_lambda)
+        return s
+
+    @staticmethod
+    def get_module_name():
+        return "simam"
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+        n = w * h - 1
+        x_minus_mu_square = (x - x.mean(dim=[2, 3], keepdim=True)).pow(2)
+        y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + self.e_lambda)) + 0.5
+
+        return x * self.act(y)
+
+
 class BoTAttention(nn.Module):
     """
     Basic self-attention layer with relative position embedding, but there are some difference from original
@@ -806,6 +968,7 @@ class C2fBoT(C2f):
         super().__init__(c1, c2, n, shortcut, g, e)
         self.m = nn.ModuleList(BoTBottleneck(self.c, self.c, f_size, shortcut, g, k=((3, 3), (3, 3)), e=1.0,
                                              head_num=head_num) for _ in range(n))
+
 
 class BasicBlock(nn.Module):
     """
@@ -937,7 +1100,7 @@ class AFPNUpsample(nn.Module):
             out_chans: int,
             act_layer: t.Callable,
             scale_factor: int = 2,
-            mode: str = 'bilinear',
+            mode: str = 'nearest',
     ):
         super(AFPNUpsample, self).__init__()
         self.upsample = nn.Sequential(
@@ -1006,7 +1169,6 @@ class AFPNC2f(nn.Module):
         self.c2f2_1 = C2f(channels[1], channels[1], c2f_nums[1])
         self.c2f2_2 = C2f(channels[2], channels[2], c2f_nums[2])
 
-
     def forward(self, x: t.Union[t.List[torch.Tensor], t.Tuple[torch.Tensor]]) -> t.Tuple[torch.Tensor, ...]:
         x0, x1, x2 = x
 
@@ -1025,6 +1187,59 @@ class AFPNC2f(nn.Module):
         bot = self.c2f2_2(bot)
 
         return top, mid, bot
+
+class BiCrossFPN(nn.Module):
+    """
+    BiFPN + Cross FPN, progressive feature fusion is only performed between 4 layers in sequence in this module
+    """
+
+    def __init__(
+            self,
+            channels: t.Union[t.List, t.Tuple],
+            width: float = 1.0,
+            act_layer: t.Optional[t.Callable] = None,
+            c2f_nums: t.List[int] = None,
+    ):
+        super(BiCrossFPN, self).__init__()
+        if act_layer is None:
+            act_layer = nn.ReLU
+        if c2f_nums is None:
+            c2f_nums = [1, 1, 1, 1]
+
+        self.down_sample_0_2 = LightConv2(channels[0], channels[2], 4, 4, p=0, act=act_layer(inplace=True))
+        self.down_sample_0_3 = LightConv2(channels[0], channels[3], 8, 8, p=0, act=act_layer(inplace=True))
+        self.down_sample_1_3 = LightConv2(channels[1], channels[3], 4, 4, p=0, act=act_layer(inplace=True))
+
+        self.up_sample_2_0 = AFPNUpsample(channels[2], channels[0], act_layer=act_layer, scale_factor=4,
+                                            mode='nearest')
+        self.up_sample_3_0 = AFPNUpsample(channels[3], channels[0], act_layer=act_layer, scale_factor=8,
+                                            mode='nearest')
+        self.up_sample_3_1 = AFPNUpsample(channels[3], channels[1], act_layer=act_layer, scale_factor=4,
+                                            mode='nearest')
+
+        self.asff_0 = ASFFThree(in_chans=channels[0], out_chans=channels[0])
+        self.asff_1 = ASFFTwo(in_chans=channels[1])
+        self.asff_2 = ASFFTwo(in_chans=channels[2])
+        self.asff_3 = ASFFThree(in_chans=channels[3], out_chans=channels[3])
+        self.c2f0 = C2fFaster(channels[0], channels[0], c2f_nums[0], False)
+        self.c2f1 = C2fFaster(channels[1], channels[1], c2f_nums[1], False)
+        self.c2f2 = C2fFaster(channels[2], channels[2], c2f_nums[2], False)
+        self.c2f3 = C2fFaster(channels[3], channels[3], c2f_nums[3], False)
+
+    def forward(self, x: t.Union[t.List[torch.Tensor], t.Tuple[torch.Tensor]]) -> t.Tuple[torch.Tensor, ...]:
+        x0, x1, x2, x3 = x
+        p0 = self.asff_0(x0, self.up_sample_2_0(x2), self.up_sample_3_0(x3))
+        p1 = self.asff_1(x1, self.up_sample_3_1(x3))
+        p2 = self.asff_2(self.down_sample_0_2(x0), x2)
+        p3 = self.asff_3(self.down_sample_0_3(x0), self.down_sample_1_3(x1), x3)
+
+        p0 = self.c2f0(p0)
+        p1 = self.c2f1(p1)
+        p2 = self.c2f2(p2)
+        p3 = self.c2f3(p3)
+
+        return p0, p1, p2, p3
+
 
 class FasterBlocks(nn.Module):
     """
@@ -1056,16 +1271,18 @@ class FasterBlocks(nn.Module):
                 layer_scale_init_value=layer_scale_init_value,
                 pconv_fw_type=pconv_fw_type
             ))
-            dim=out_dim
+            dim = out_dim
         self.blocks = nn.Sequential(*blocks)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.blocks(x)
 
+
 class FasterBlock(nn.Module):
     """
     based on PConv + PWC
     """
+
     def __init__(
             self,
             dim: int,
@@ -1092,7 +1309,7 @@ class FasterBlock(nn.Module):
         self.use_layer_scale = use_layer_scale
         if use_layer_scale:
             self.layer_scale = nn.Parameter(
-                layer_scale_init_value * torch.ones((dim, ), requires_grad=True)
+                layer_scale_init_value * torch.ones((dim,), requires_grad=True)
             )
         # adapt to neck, since dim and dim_out may be different
         self.dim = dim
@@ -1114,6 +1331,7 @@ class FasterBlock(nn.Module):
             x = self.trans(x)
         return x
 
+
 class AFPNPConv(nn.Module):
     """
     Asymptotic Feature Pyramid Network (AFPN) + Pconv
@@ -1133,7 +1351,7 @@ class AFPNPConv(nn.Module):
             layer_scale_init_value: float = 1e-5
     ):
         """
-        Args:
+        Args
             channels: the number of channels for different layers used for fusion
             width: width param used to implement models at different scales in the channel dimension
             act_layer: activate layers
@@ -1162,7 +1380,7 @@ class AFPNPConv(nn.Module):
                 use_layer_scale=use_layer_scale,
                 layer_scale_init_value=layer_scale_init_value
             )
-        for _ in range(c2f_nums[0])))
+            for _ in range(c2f_nums[0])))
 
         self.c2f1_1 = nn.Sequential(*(
             FasterBlock(
@@ -1191,7 +1409,6 @@ class AFPNPConv(nn.Module):
         self.asff_mid2_1 = ASFFThree(in_chans=channels[1], out_chans=int(channels[1] * width))
         self.asff_bottom2_2 = ASFFThree(in_chans=channels[2], out_chans=int(channels[2] * width))
 
-
         self.c2f2_0 = nn.Sequential(*(
             FasterBlock(
                 dim=channels[0],
@@ -1201,7 +1418,7 @@ class AFPNPConv(nn.Module):
                 use_layer_scale=use_layer_scale,
                 layer_scale_init_value=layer_scale_init_value
             )
-        for _ in range(c2f_nums[0])))
+            for _ in range(c2f_nums[0])))
         self.c2f2_1 = nn.Sequential(*(
             FasterBlock(
                 dim=channels[1],
@@ -1211,7 +1428,7 @@ class AFPNPConv(nn.Module):
                 use_layer_scale=use_layer_scale,
                 layer_scale_init_value=layer_scale_init_value
             )
-        for _ in range(c2f_nums[1])))
+            for _ in range(c2f_nums[1])))
 
         self.c2f2_2 = nn.Sequential(*(
             FasterBlock(
@@ -1222,8 +1439,7 @@ class AFPNPConv(nn.Module):
                 use_layer_scale=use_layer_scale,
                 layer_scale_init_value=layer_scale_init_value
             )
-        for _ in range(c2f_nums[2])))
-
+            for _ in range(c2f_nums[2])))
 
     def forward(self, x: t.Union[t.List[torch.Tensor], t.Tuple[torch.Tensor]]) -> t.Tuple[torch.Tensor, ...]:
         x0, x1, x2 = x
@@ -1249,6 +1465,7 @@ class BottleneckCondConv(nn.Module):
     """
     Bottleneck with CondConv
     """
+
     def __init__(
             self,
             c1: int,
@@ -1328,29 +1545,32 @@ class ChannelAttention(nn.Module):
         self.fc2 = nn.Conv2d(hidden_chans, in_chans, kernel_size=1, stride=1, bias=True)
         self.act = nn.ReLU(inplace=True)
         self.in_chans = in_chans
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x dim is (B, C, H, W)
         """
         # (B, C, 1, 1)
-        x1 = x.mean(dim=(2, 3), keepdim=True)
-        # x1 = self.avg_pool(x)
+        # x1 = x.mean(dim=(2, 3), keepdim=True)
+        x1 = self.avg_pool(x)
         x1 = self.fc2(self.act(self.fc1(x1)))
         x1 = torch.sigmoid(x1)
 
         # (B, C, 1, 1)
-        x2 = x.max(dim=2, keepdim=True)[0].max(dim=3, keepdim=True)[0]
-        # x2 = self.max_pool(x)
+        # x2 = x.max(dim=2, keepdim=True)[0].max(dim=3, keepdim=True)[0]
+        x2 = self.max_pool(x)
         x2 = self.fc2(self.act(self.fc1(x2)))
         x2 = torch.sigmoid(x2)
-        x = x * (x1 + x2)
+        x = x1 + x2
+        x = x.view(-1, self.in_chans, 1, 1)
         return x
+
 
 class CPCA(nn.Module):
     """
     Channel Attention and Spatial Attention based on CPCA
     """
-    
+
     def __init__(self, in_chans: int, reduction_ratio: int = 4):
         super(CPCA, self).__init__()
         self.in_chans = in_chans
@@ -1375,7 +1595,8 @@ class CPCA(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv(x)
         x = self.act(x)
-        x = self.ca(x)
+        channel_attn = self.ca(x)
+        x = channel_attn * x
 
         x_init = self.dwc5_5(x)
         x1 = self.dwc1_7(x_init)
@@ -1388,8 +1609,11 @@ class CPCA(nn.Module):
         x3 = self.dwc21_1(x3)
 
         spatial_atn = x1 + x2 + x3 + x_init
-        y = self.conv(x * spatial_atn)
+        spatial_atn = self.conv(spatial_atn)
+        y = x * spatial_atn
+        y = self.conv(y)
         return y
+
 
 class ECA(nn.Module):
     """
@@ -1431,4 +1655,145 @@ class ECA(nn.Module):
         y = y.transpose(-1, -2).unsqueeze(-1)
         y = self.sigmoid(y)
         return x * y
+
+class EMA(nn.Module):
+    """
+    EMA
+    """
+    def __init__(self, channels, factor=8):
+        super(EMA, self).__init__()
+        self.groups = factor
+        assert channels // self.groups > 0
+        self.softmax = nn.Softmax(-1)
+        self.agp = nn.AdaptiveAvgPool2d((1, 1))
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+        self.gn = nn.GroupNorm(channels // self.groups, channels // self.groups)
+        self.conv1x1 = nn.Conv2d(channels // self.groups, channels // self.groups, kernel_size=1, stride=1, padding=0)
+        self.conv3x3 = nn.Conv2d(channels // self.groups, channels // self.groups, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+        group_x = x.reshape(b * self.groups, -1, h, w)  # b*g,c//g,h,w
+        x_h = self.pool_h(group_x)
+        x_w = self.pool_w(group_x).permute(0, 1, 3, 2)
+        hw = self.conv1x1(torch.cat([x_h, x_w], dim=2))
+        x_h, x_w = torch.split(hw, [h, w], dim=2)
+        x1 = self.gn(group_x * x_h.sigmoid() * x_w.permute(0, 1, 3, 2).sigmoid())
+        x2 = self.conv3x3(group_x)
+        x11 = self.softmax(self.agp(x1).reshape(b * self.groups, -1, 1).permute(0, 2, 1))
+        x12 = x2.reshape(b * self.groups, c // self.groups, -1)  # b*g, c//g, hw
+        x21 = self.softmax(self.agp(x2).reshape(b * self.groups, -1, 1).permute(0, 2, 1))
+        x22 = x1.reshape(b * self.groups, c // self.groups, -1)  # b*g, c//g, hw
+        weights = (torch.matmul(x11, x12) + torch.matmul(x21, x22)).reshape(b * self.groups, 1, h, w)
+        return (group_x * weights.sigmoid()).reshape(b, c, h, w)
+
+
+class RepStem(nn.Module):
+    """
+    RepConv with PatchEmbedding
+    """
+
+    def __init__(self, in_chans: int, out_chans: int):
+        super(RepStem, self).__init__()
+        self.stem = nn.Sequential(
+            RepConv(in_chans, out_chans // 2,  k=3, s=2, act=nn.ReLU(inplace=False)),
+            RepConv(out_chans // 2, out_chans, k=3, s=2, act=False)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.stem(x)
+
+
+class RepStemDWC(nn.Module):
+    """
+    RepConv + DWConv with PatchEmbedding
+    """
+
+    def __init__(self, in_chans: int, out_chans: int):
+        super(RepStemDWC, self).__init__()
+        self.stem = nn.Sequential(
+            RepConv(in_chans, out_chans // 2, k=3, s=2, act=nn.ReLU(inplace=False)),
+            RepConv(out_chans // 2, out_chans, k=3, s=2, g=out_chans // 2, act=nn.ReLU(inplace=False)),
+            RepConv1x1(out_chans, out_chans, k=1, s=1, act=False)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.stem(x)
+
+
+class LightBlocks(nn.Module):
+    """
+    stacking multiple blocks of  DWC and PWC
+    """
+
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            depth: int,
+            k: int = 1,
+            s: int = 1,
+            p: t.Optional[int] = None,
+            g: t.Optional[int] = None,
+            d: int = 1,
+            act: t.Union[bool, nn.Module] = True
+    ):
+        super(LightBlocks, self).__init__()
+        blocks = []
+        for i in range(depth):
+            blocks.append(
+                LightConv2(
+                    c1=c1,
+                    c2=c2,
+                    k=k,
+                    s=s,
+                    p=p,
+                    g=g,
+                    d=d,
+                    act=act
+                )
+            )
+            c1 = c2
+        self.blocks = nn.Sequential(*blocks)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.blocks(x)
+
+
+class SPPCA(nn.Module):
+    """
+    Spatial prior partial convolution attention
+    """
+
+    def __init__(
+            self,
+            in_chans: int,
+            out_chans: int,
+            n_div: int = 4,
+            forward: str = 'split_cat',
+    ):
+        super(SPPCA, self).__init__()
+        self.pconv = PartialConv(in_chans, n_div, forward)
+        self.conv = Conv(in_chans, out_chans, k=1, s=1, act=nn.Hardswish(inplace=True))
+
+        self.conv2 = Conv(in_chans, out_chans, k=1, s=1, act=False)
+        self.dw1_5 = Conv(out_chans, out_chans, k=(1, 5), s=1, p=(0, 2), g=out_chans, act=False)
+        self.dw5_1 = Conv(out_chans, out_chans, k=(5, 1), s=1, p=(2, 0), g=out_chans, act=False)
+
+        self.dw1_9 = Conv(out_chans, out_chans, k=(1, 9), s=1, p=(0, 4), g=out_chans, act=False)
+        self.dw9_1 = Conv(out_chans, out_chans, k=(9, 1), s=1, p=(4, 0), g=out_chans, act=False)
+
+        self.ca = ECA(out_chans)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        attn = self.conv2(x)
+        sa1 = self.dw5_1(self.dw1_5(attn))
+        sa2 = self.dw9_1(self.dw1_9(attn))
+        attn = attn + sa1 + sa2
+        attn = self.ca(attn)
+
+        x = self.conv(self.pconv(x)) * attn
+        return x
+
 

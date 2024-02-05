@@ -368,8 +368,21 @@ class BaseTrainer:
                     self.tloss = (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None \
                         else self.loss_items
 
-                # Backward, 在反向传播时, 对Loss进行scale放大2的k次幂,转为FP16,计算梯度
+                torch.use_deterministic_algorithms(False)
+                # Backward, 在反向传播时, 对Loss进行scale放大2的k次幂,转为FP32算梯度
                 self.scaler.scale(self.loss).backward()
+
+                # TODO: add constraint training
+                """
+                # 进行约束训练，筛选哪些通道重要, 哪些通道不重要
+                # 让模型在训练初期，更加关注正则化, 更快的区分重要Filter和不重要的Filter; 在训练后期, 减小正则化的强度
+                # 让模型专注于拟合训练数据
+                l1_lambda = 1e-2 * (1 - 0.9 * epoch / self.epochs)
+                for k, m in self.model.named_modules():
+                    if isinstance(m, nn.BatchNorm2d):
+                        m.weight.grad.data.add_(l1_lambda * torch.sign(m.weight.data))
+                        m.bias.grad.data.add_(1e-2 * torch.sign(m.bias.data))
+                """
 
                 # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
                 # 累积batch进行更行

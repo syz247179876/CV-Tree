@@ -11,5 +11,5 @@ def get_model(model: str, device: str = 'cuda'):
     return model
 
 if __name__ == '__main__':
-    model = get_model('yolov8n.yaml')
-    model.train(data=DATASET_VOC, epochs=300, batch=32, lr0=0.01, name=f'train-{DATASET_VOC}-baseline-v8s')
+    model = get_model(r'yolov8n.yaml')
+    model.train(data=DATASET_FLIR_ADAS_V2, epochs=300, batch=32, lr0=0.01, name=f'train-{DATASET_FLIR_ADAS_V2}-baseline-v8n', resume=False)

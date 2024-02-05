@@ -8,7 +8,7 @@ from ultralytics.utils.metrics import OKS_SIGMA
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import TaskAlignedAssigner, dist2bbox, make_anchors
 
-from .metrics import bbox_iou
+from .metrics import bbox_iou, shape_iou
 from .tal import bbox2dist
 
 
@@ -68,12 +68,16 @@ class BboxLoss(nn.Module):
         self.use_dfl = use_dfl
 
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
-        """IoU loss."""
+        """IoU loss.
+        先进行CIOU, 再进行DFL, 利用交叉熵损失将预测的位置迅速拉近真实目标位置附近, 目标框的大小都是相对于不同尺度的特征图尺度的, DFL额外
+        增加了0-15, 共16个（类别）进行交叉熵损失的学习。
+        """
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+        # iou = shape_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, scale=1.2)
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
-        # DFL loss, 带权重的交叉熵
+        # DFL loss, 带权重的交叉熵, 使得预测坐标的结果逐渐向正确的区域逼近
         if self.use_dfl:
             target_ltrb = bbox2dist(anchor_points, target_bboxes, self.reg_max)
             loss_dfl = self._df_loss(pred_dist[fg_mask].view(-1, self.reg_max + 1), target_ltrb[fg_mask]) * weight
@@ -87,6 +91,7 @@ class BboxLoss(nn.Module):
     def _df_loss(pred_dist, target):
         """Return sum of left and right DFL losses."""
         # Distribution Focal Loss (DFL) proposed in Generalized Focal Loss https://ieeexplore.ieee.org/document/9792391
+        # tl, tr, wl, wr分别表示中心点据周围取整点的距离, 作为权重
         tl = target.long()  # target left
         tr = tl + 1  # target right
         wl = tr - target  # weight left

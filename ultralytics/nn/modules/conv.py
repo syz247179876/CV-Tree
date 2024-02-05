@@ -11,7 +11,8 @@ import typing as t
 
 __all__ = ('autopad', 'Conv', 'Conv2', 'LightConv', 'DWConv', 'DWConvTranspose2d', 'ConvTranspose', 'Focus', 'GhostConv',
            'ChannelAttention', 'SpatialAttention', 'CBAM', 'Concat', 'RepConv', 'ODConv', 'ConvOD', 'PartialConv',
-           'PConv', 'CondConv')
+           'PConv', 'CondConv', 'RepConv1x1', 'ConcatBiFPN', 'LightConv2', 'ConcatBiDirectFPN', 'MAConv',
+           'EnhancedConcat', 'RepMAConv')
 
 
 def autopad(k, p=None, d=1):  # kernel, padding, dilation
@@ -327,6 +328,82 @@ class Conv(nn.Module):
         return self.act(self.conv(x))
 
 
+class MAConv(nn.Module):
+    """
+    MaxPool + AvgPool + Conv for down-sampling
+    """
+
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            k: int = 1,
+            s: int = 1,
+            p: t.Optional[int] = None,
+            g: int = 1,
+            d: int = 1,
+            act: t.Union[bool, nn.Module] = True
+    ):
+
+
+        super().__init__()
+        self.conv = Conv(c1, c2, k, s, p, g, d, act)
+        self.max_pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.avg_pool = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.c1 = c1
+        self.c2 = c2
+        if c1 != c2:
+            self.max_conv = Conv(c1, c2, 1, 1, act=act)
+            self.avg_conv = Conv(c1, c2, 1, 1, act=act)
+        self.attn = nn.Parameter(torch.ones(3, dtype=torch.float32), requires_grad=True)
+        self.eps = 0.0001
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x1 = self.conv(x)
+        x2 = self.max_pool(x)
+        x3 = self.avg_pool(x)
+        attn = torch.sigmoid(self.attn)
+        x = x1 * attn[0] + x2 * attn[1] + x3 * attn[2]
+        return x
+
+
+class RepMAConv(nn.Module):
+    """
+    RepConv + MaxPool + AvgPool + Conv for down-sampling
+    """
+
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            k: int = 1,
+            s: int = 1,
+            p: t.Optional[int] = None,
+            g: int = 1,
+            d: int = 1,
+            act: t.Union[bool, nn.Module] = True
+    ):
+        super(RepMAConv, self).__init__()
+        self.conv = RepConv(c1, c2, k, s, autopad(k, p=p, d=d), g, d, act)
+        self.max_pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.avg_pool = nn.AvgPool2d(kernel_size=2, stride=2)
+        self.c1 = c1
+        self.c2 = c2
+        if c1 != c2:
+            self.max_conv = Conv(c1, c2, 1, 1, act=act)
+            self.avg_conv = Conv(c1, c2, 1, 1, act=act)
+        self.attn = nn.Parameter(torch.ones(3, dtype=torch.float32), requires_grad=True)
+        self.eps = 0.0001
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x1 = self.conv(x)
+        x2 = self.max_pool(x)
+        x3 = self.avg_pool(x)
+        attn = torch.sigmoid(self.attn)
+        x = x1 * attn[0] + x2 * attn[1] + x3 * attn[2]
+        return x
+
 class Conv2(Conv):
     """Simplified RepConv module with Conv fusing."""
 
@@ -403,6 +480,25 @@ class LightConv(nn.Module):
         """Apply 2 convolutions to input tensor."""
         return self.conv2(self.conv1(x))
 
+class LightConv2(nn.Module):
+
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            k: int = 1,
+            s: int = 1,
+            p: t.Optional[int] = None,
+            g: t.Optional[int] = None,
+            d: int = 1,
+            act: t.Union[bool, nn.Module] = True
+    ):
+        super(LightConv2, self).__init__()
+        self.conv1 = Conv(c1, c2, 1, act=False)
+        self.conv2 = Conv(c1, c1, k, s, p=p, g=g or math.gcd(c1, c2), d=d, act=act)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv1(self.conv2(x))
 
 class DWConv(Conv):
     """Depth-wise convolution."""
@@ -576,6 +672,106 @@ class RepConv(nn.Module):
         if hasattr(self, 'id_tensor'):
             self.__delattr__('id_tensor')
 
+class RepConv1x1(nn.Module):
+    """
+    RepConv with 1x1 Conv, BN, Act.
+    when reasoning, merge 1x1 convolution and BN to form a new 1x1 convolution.
+
+    note: compared RepConv above, it supports 1x1 Conv and BN reparameters
+    """
+    default_act = nn.SiLU()
+
+    def __init__(
+            self,
+            c1: int,
+            c2: int,
+            k: int = 1,
+            s: int = 1,
+            p: int = 0,
+            g: int = 1,
+            d: int = 1,
+            act: t.Union[nn.Module, bool] = True,
+            bn: bool = False,
+            deploy=False
+    ):
+        super(RepConv1x1, self).__init__()
+        self.g = g
+        self.c1 = c1
+        self.c2 = c2
+        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+        self.bn = nn.BatchNorm2d(num_features=c1) if bn and c2 == c1 and s == 1 else None
+        self.conv1 = Conv(c1, c2, 1, s, p=0, g=g, act=False)
+
+    def forward_fuse(self, x) -> torch.Tensor:
+        return self.act(self.conv(x))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        id_out = 0 if self.bn is None else self.bn(x)
+        return self.act(self.conv1(x) + id_out)
+
+    def get_equivalent_kernel_bias(self):
+
+        kernel1x1, bias1x1 = self._fuse_bn_tensor(self.conv1)
+        kernelid, biasid = self._fuse_bn_tensor(self.bn)
+        return kernel1x1 + kernelid, bias1x1 + biasid
+
+    def _fuse_bn_tensor(self, branch):
+        if branch is None:
+            return 0, 0
+        if isinstance(branch, Conv):
+            kernel = branch.conv.weight
+            running_mean = branch.bn.running_mean
+            running_var = branch.bn.running_var
+            gamma = branch.bn.weight
+            beta = branch.bn.bias
+            eps = branch.bn.eps
+        elif isinstance(branch, nn.BatchNorm2d):
+            if not hasattr(self, 'id_tensor'):
+                input_dim = self.c1 // self.g
+                kernel_value = np.zeros((self.c1, input_dim, 1, 1), dtype=np.float32)
+                # 生成类单位矩阵
+                for i in range(self.c1):
+                    kernel_value[i, i % input_dim, 0, 0] = 1
+                self.id_tensor = torch.from_numpy(kernel_value).to(branch.weight.device)
+            kernel = self.id_tensor
+            running_mean = branch.bn.running_mean
+            running_var = branch.bn.running_var
+            gamma = branch.bn.weight
+            beta = branch.bn.bias
+            eps = branch.bn.eps
+        std = (running_var + eps).sqrt()
+        t = (gamma / std).reshape(-1, 1, 1, 1)
+        return kernel * t, beta - running_mean * gamma / std
+
+    def fuse_convs(self):
+        """
+        fuse 1x1 Conv and BN
+        """
+        if hasattr(self, 'conv'):
+            return
+        kernel, bias = self.get_equivalent_kernel_bias()
+        self.conv = nn.Conv2d(
+            in_channels=self.conv1.conv.in_channels,
+            out_channels=self.conv1.conv.out_channels,
+            kernel_size=self.conv1.conv.kernel_size,
+            stride=self.conv1.conv.stride,
+            padding=self.conv1.conv.padding,
+            dilation=self.conv1.conv.dilation,
+            groups=self.conv1.conv.groups,
+            bias=True
+        ).requires_grad_(False)
+        self.conv.weight.data = kernel
+        self.conv.bias.data = bias
+        for param in self.parameters():
+            param.detach_()
+        self.__delattr__('conv1')
+        if hasattr(self, 'nm'):
+            self.__delattr__('nm')
+        if hasattr(self, 'bn'):
+            self.__delattr__('nm')
+        if hasattr(self, 'id_tensor'):
+            self.__delattr__('id_tensor')
+
 
 class ChannelAttention(nn.Module):
     """Channel-attention module https://github.com/open-mmlab/mmdetection/tree/v3.0.0rc1/configs/rtmdet."""
@@ -634,6 +830,79 @@ class Concat(nn.Module):
         """Forward pass for the YOLOv8 mask Proto module."""
         return torch.cat(x, self.d)
 
+class ConcatBiFPN(nn.Module):
+    """
+    weighted feature fusion, since different input features are at different resolutions, they usually contribute to
+    the output feature unequally.
+    """
+    def __init__(self, dimension: int = 1, weight_num: int = 2):
+        super(ConcatBiFPN, self).__init__()
+        self.d = dimension
+        self.weights = nn.Parameter(torch.ones(weight_num, dtype=torch.float32), requires_grad=True)
+        self.eps = 0.0001
+        self.weight_num = weight_num
+        self.relu = nn.ReLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        w = self.relu(self.weights)
+        w = w / (torch.sum(w, dim=0) + self.eps)
+        x = [w[i] * x[i] for i in range(self.weight_num)]
+        return torch.cat(x, dim=self.d)
+
+
+class EnhancedConcat(nn.Module):
+    """
+    Enhancing feature fusion capability by introducing more path aggregation
+    """
+
+    def __init__(
+            self,
+            dimension: int = 1,
+            mode: str = 'up',
+    ):
+        super(EnhancedConcat, self).__init__()
+        self.d = dimension
+        self.mode = mode
+        self.trans = nn.Upsample(None, 2, 'nearest')
+
+    def forward(self, x: torch.Tensor):
+        temp = x[-1].clone()
+        temp = self.trans(temp)
+        return torch.cat([x[0], x[1], temp], dim=self.d)
+
+class ConcatBiDirectFPN(nn.Module):
+    """
+    Add additional direct feature interaction between adjacent layers
+    """
+
+    def __init__(
+            self,
+            dimension: int = 1,
+            weight_num: int = 2,
+            mode: str = 'up',
+            c1: int = 128,
+            c2: int = 64,
+    ):
+        super(ConcatBiDirectFPN, self).__init__()
+        self.d = dimension
+        self.weights = nn.Parameter(torch.ones(weight_num, dtype=torch.float32), requires_grad=True)
+        self.eps = 0.0001
+        self.weight_num = weight_num
+        self.mode = mode
+        if self.mode == 'up':
+            self.trans = nn.Upsample(None, 2, 'nearest')
+        elif self.mode == 'down':
+            self.trans = Conv(c1, c2, k=3, s=2)
+
+    def forward(self, x: torch.Tensor):
+        w = self.weights
+        w = w / (torch.sum(w, dim=0) + self.eps)
+        temp = x[-1].clone()
+        temp = self.trans(temp)
+        x = [w[i] * x[i] for i in range(self.weight_num - 1)]
+        x.append(w[-1] * temp)
+        return torch.cat(x, dim=self.d)
+
 
 class PartialConv(nn.Module):
     """
@@ -669,7 +938,7 @@ class PartialConv(nn.Module):
         return x
 
     def forward_split_cat(self, x: torch.Tensor) -> torch.Tensor:
-        # split
+        # for train/inference
         x1, x2 = torch.split(x, [self.dim_partial, self.dim_untouched], dim=1)
         x1 = self.partial_conv3(x1)
         x = torch.cat((x1, x2), dim=1)
@@ -792,7 +1061,6 @@ class CondConv(nn.Module):
         y = self.bn(y)
         y = self.act(y)
         return y
-
 
 
 if __name__ == '__main__':

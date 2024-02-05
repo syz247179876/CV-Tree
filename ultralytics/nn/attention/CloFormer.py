@@ -6,10 +6,12 @@ import yaml
 from einops import rearrange
 from timm.layers import SEModule
 from timm.models.layers import DropPath
-from ultralytics.nn.modules.conv import Conv
 
+from ultralytics.nn.modules.block import ECA
+from ultralytics.nn.modules.conv import Conv, RepConv
 
-__all__ = ['cloformer', 'CloFormer', 'CloLayer', 'PatchEmbedding', 'CloBlock', 'LightStem']
+__all__ = ['cloformer', 'CloFormer', 'CloLayer', 'PatchEmbedding', 'CloBlock', 'LightStem', 'RepStem',
+           'CBConvFFN', 'CBTokenMixer']
 
 from ultralytics.nn.modules.conv import autopad
 
@@ -90,6 +92,32 @@ class LightStem(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.stem(x)
 
+
+class RepStem(nn.Module):
+    """
+    Rep stem
+    """
+
+    def __init__(
+            self,
+            in_chans: int,
+            out_chans: int,
+    ):
+        super(RepStem, self).__init__()
+        self.stem = nn.Sequential(
+            RepConv(in_chans, out_chans // 2, k=3, s=2),
+            RepConv(out_chans // 2, out_chans, k=3, s=2),
+            RepConv(out_chans, out_chans, k=3, s=1, bn=True),
+            RepConv(out_chans, out_chans, k=3, s=1, bn=True),
+            nn.Conv2d(out_chans, out_chans, kernel_size=1, stride=1),
+            # using GN instead of LN to process 4D without passing in H, W
+            nn.GroupNorm(1, out_chans),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.stem(x)
+
+        
 class AttnMap(nn.Module):
     """
     The strong non-linearity leads to higher-quality context-aware weights.
@@ -138,7 +166,7 @@ class CloAttention(nn.Module):
             attn_drop: float = 0.,
             proj_drop: float = 0.,
             qkv_bias: bool = False,
-            use_se: bool = False,
+            use_attn: bool = False,
     ):
         assert sum(group_split) == num_heads
         assert len(kernel_sizes) + 1 == len(group_split)
@@ -154,6 +182,7 @@ class CloAttention(nn.Module):
         convs = []
         act_blocks = []
         qkvs = []
+        attns = []
 
         # local branch
         for i in range(len(kernel_sizes)):
@@ -163,11 +192,12 @@ class CloAttention(nn.Module):
                 continue
             qkvs.append(nn.Conv2d(dim, 3 * self.head_dim * group_head, 1, bias=qkv_bias))
             # DWC
-            convs.append(nn.Sequential(
+            convs.append(
                 nn.Conv2d(3 * self.head_dim * group_head, 3 * self.head_dim * group_head,
                                    kernel_size, 1, autopad(kernel_size), groups=3 * self.head_dim * group_head),
-                SEModule(3 * self.head_dim * group_head) if use_se else nn.Identity(),
-            ))
+            )
+            # attn
+            attns.append(ECA(self.head_dim * group_head) if use_attn else nn.Identity())
             # fc + act + fc
             act_blocks.append(AttnMap(self.head_dim * group_head))
 
@@ -182,6 +212,7 @@ class CloAttention(nn.Module):
         self.convs = nn.ModuleList(convs)
         self.act_blocks = nn.ModuleList(act_blocks)
         self.qkvs = nn.ModuleList(qkvs)
+        self.attns = nn.ModuleList(attns)
 
         self.proj = nn.Conv2d(dim, dim, 1, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
@@ -189,7 +220,7 @@ class CloAttention(nn.Module):
 
     def low_frequency_attention(self, x: torch.Tensor):
         """
-        execute global branch, based on lcoal
+        execute global branch
         """
 
         # (b, c, h, w) -> (b, local_head_num, h*w, head_dim)
@@ -227,7 +258,8 @@ class CloAttention(nn.Module):
             x: torch.Tensor,
             to_qkv: nn.Module,
             token_mixer: nn.Module,
-            attn_block: nn.Module
+            attn_block: nn.Module,
+            act_block: nn.Module
     ) -> torch.Tensor:
         """
         execute local branch
@@ -238,9 +270,10 @@ class CloAttention(nn.Module):
         qkv = token_mixer(qkv).reshape(b, 3, -1, h, w).transpose(0, 1).contiguous()
         # (b, dim, h, w)
         q, k, v = qkv
-        attn = attn_block(torch.mul(q, k).mul(self.scaler))
+        v = attn_block(v)
+        attn = act_block(torch.mul(q, k).mul(self.scaler))
         attn = self.attn_drop(torch.tanh(attn))
-        out = torch.mul(attn, v)
+        out = attn.mul(v)
         return out
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -251,7 +284,9 @@ class CloAttention(nn.Module):
             if self.group_split[i] == 0:
                 continue
             # (b, local_head_num * head_dim, h, w)
-            res.append(self.high_frequency_attention(x, self.qkvs[i], self.convs[i], self.act_blocks[i]))
+            res.append(self.high_frequency_attention(x, self.qkvs[i], self.convs[i], self.attns[i], self.act_blocks[i]))
+            # 旧版，在DWConv后不加注意力
+            # res.append(self.high_frequency_attention(x, self.qkvs[i], self.convs[i], self.act_blocks[i]))
         if self.group_split[-1] != 0:
             # (b, global_head_num * head_dim, h, w)
             res.append(self.low_frequency_attention(x))
@@ -337,7 +372,7 @@ class CloBlock(nn.Module):
             mlp_drop: float = 0.,
             drop_path: float = 0.,
             qkv_bias: bool = False,
-            use_se: bool = False,
+            use_attn: bool = False,
     ):
         super(CloBlock, self).__init__()
         self.dim = dim
@@ -346,7 +381,7 @@ class CloBlock(nn.Module):
         # CloAttention
         self.norm1 = nn.GroupNorm(1, dim)
         self.attn = CloAttention(dim, num_heads, group_split, kernel_sizes, window_size, attn_drop, mlp_drop,
-                                 qkv_bias, use_se)
+                                 qkv_bias, use_attn)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
         # ConvFFN
@@ -365,6 +400,73 @@ class CloBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.drop_path(self.attn(self.norm1(x)))
+        x = self.downsample(x) + self.drop_path(self.mlp(self.norm2(x)))
+        return x
+
+class CBTokenMixer(nn.Module):
+    """
+    Token Mixer in CloBlock
+    """
+    
+    def __init__(
+            self,
+            dim: int,
+            out_dim: int,
+            num_heads: int,
+            group_split: t.List[int],
+            kernel_sizes: t.List[int],
+            window_size: int,
+            attn_drop: float = 0.,
+            mlp_drop: float = 0.,
+            drop_path: float = 0.,
+            qkv_bias: bool = False,
+            use_attn: bool = False,
+    ):
+        super(CBTokenMixer, self).__init__()
+        self.dim = dim
+
+        # CloAttention
+        self.norm1 = nn.GroupNorm(1, dim)
+        self.attn = CloAttention(dim, num_heads, group_split, kernel_sizes, window_size, attn_drop, mlp_drop,
+                                 qkv_bias, use_attn)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.drop_path(self.attn(self.norm1(x)))
+        return x
+
+
+class CBConvFFN(nn.Module):
+    """
+    Channel Mixer in CloBlock
+    """
+
+    def __init__(
+            self,
+            dim: int,
+            out_dim: int,
+            mlp_kernel_size: int,
+            mlp_ratio: int,
+            stride: int,
+            mlp_drop: float = 0.,
+            drop_path: float = 0.,
+    ):
+        super(CBConvFFN, self).__init__()
+        # ConvFFN
+        self.norm2 = nn.GroupNorm(1, dim)
+        hidden_dim = int(dim * mlp_ratio)
+        self.stride = stride
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        if stride == 1:
+            self.downsample = nn.Identity()
+        else:
+            self.downsample = nn.Sequential(
+                Conv(dim, dim, mlp_kernel_size, s=stride, g=dim, act=False),
+                nn.Conv2d(dim, out_dim, 1, 1, 0),
+            )
+        self.mlp = ConvFFN(dim, out_dim, hidden_dim, mlp_kernel_size, stride, mlp_drop=mlp_drop)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.downsample(x) + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
@@ -389,16 +491,16 @@ class CloLayer(nn.Module):
             mlp_drop: float = 0.,
             drop_path: t.List[float] = [0., 0.],
             qkv_bias: bool = False,
-            use_se: bool = False,
+            use_attn: bool = False,
             downsample: bool = True,
     ):
         super(CloLayer, self).__init__()
         self.dim = dim
         self.depth = depth
-        self.clo_blocks = nn.Sequential(
-            *[
+        self.clo_blocks = nn.ModuleList(
+            [
                 CloBlock(dim, dim, num_heads, group_split, kernel_sizes, window_size, mlp_kernel_size, mlp_ratio,
-                         1, attn_drop, mlp_drop, drop_path[i], qkv_bias=qkv_bias, use_se=use_se)
+                         1, attn_drop, mlp_drop, drop_path[i], qkv_bias=qkv_bias, use_attn=use_attn)
                 for i in range(depth - 1)
             ]
         )
@@ -406,16 +508,18 @@ class CloLayer(nn.Module):
             # need downsampling branch
             self.clo_blocks.append(
                 CloBlock(dim, out_dim, num_heads, group_split, kernel_sizes, window_size, mlp_kernel_size, mlp_ratio,
-                         2, attn_drop, mlp_drop, drop_path[depth - 1], qkv_bias=qkv_bias, use_se=use_se)
+                         2, attn_drop, mlp_drop, drop_path[depth - 1], qkv_bias=qkv_bias, use_attn=use_attn)
             )
         else:
             self.clo_blocks.append(
                 CloBlock(dim, out_dim, num_heads, group_split, kernel_sizes, window_size, mlp_kernel_size, mlp_ratio,
-                         1, attn_drop, mlp_drop, drop_path[depth - 1], qkv_bias=qkv_bias, use_se=use_se)
+                         1, attn_drop, mlp_drop, drop_path[depth - 1], qkv_bias=qkv_bias, use_attn=use_attn)
             )
 
     def forward(self, x: torch.Tensor):
-        return self.clo_blocks(x)
+        for blk in self.clo_blocks:
+            x = blk(x)
+        return x
 
 
 class CloFormer(nn.Module):

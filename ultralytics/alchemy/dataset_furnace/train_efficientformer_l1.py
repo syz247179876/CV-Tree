@@ -11,6 +11,6 @@ def get_model(model: str, device: str = 'cuda'):
     return model
 
 if __name__ == '__main__':
-    model = get_model('yolov8s-EfficientFormer-L1.yaml')
-    model.train(data=DATASET_VOC, epochs=300, batch=16, lr0=0.01,
-                name=f'train-{DATASET_VOC}-EfficientFormer-L1')
+    model = get_model('yolov8n-EfficientFormer-L1.yaml')
+    # model.train(data=DATASET_VOC, epochs=300, batch=16, lr0=0.01,
+    #             name=f'train-{DATASET_VOC}-EfficientFormer-L1')

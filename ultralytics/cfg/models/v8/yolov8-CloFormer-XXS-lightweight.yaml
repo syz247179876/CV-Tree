@@ -31,39 +31,49 @@ use_se: False
 # YOLOv8.0n backbone
 backbone:
   # [from, repeats, module, args]
-  - [-1, 1, CloFormerLightStem, [32]]  # 0-P1/4
-  - [-1, 1, CloLayer, [32, 0, 4, [3, 1], [3], 8, 5, 2, False]] # 1-P2/4
-  - [-1, 1, CloBlock, [64, 1, 4, [3, 1], [3], 8, 5, 2, 2]] # downsample
-  - [-1, 1, CloLayer, [64, 2, 4, [2, 2], [5], 4, 5, 2, False]] # 3-P3/8
-  - [-1, 1, CloBlock, [128, 3, 4, [2, 2], [5], 4, 5, 2, 2]]
-  - [-1, 5, CloLayer, [128, 4, 8, [4, 4], [7], 2, 5, 2, False]] # 5-P4/16
-  - [-1, 1, CloBlock, [256, 5, 8, [4, 4], [7], 2, 5, 2, 2]]
-  - [-1, 1, CloLayer, [256, 6, 16, [4, 12], [9], 1, 5, 2, False]] # 7-P5/32
-  - [-1, 1, CloBlock, [256, 7, 16, [4, 12], [9], 1, 5, 2, 1]]
+#  - [-1, 1, CloFormerLightStem, [32]]  # 0-P1/4
+#  - [-1, 1, CloLayer, [32, 0, 4, [3, 1], [3], 8, 5, 4, False]] # 1-P2/4
+#  - [-1, 1, CloBlock, [64, 1, 4, [3, 1], [3], 8, 5, 4, 2]] # downsample
+#  - [-1, 1, CloLayer, [64, 2, 4, [2, 2], [5], 4, 5, 4, False]] # 3-P3/8
+#  - [-1, 1, CloBlock, [128, 3, 4, [2, 2], [5], 4, 5, 4, 2]]
+#  - [-1, 5, CloLayer, [128, 4, 8, [4, 4], [7], 2, 5, 4, False]] # 5-P4/16
+#  - [-1, 1, CloBlock, [256, 5, 8, [4, 4], [7], 2, 5, 2, 2]]
+#  - [-1, 1, CloLayer, [256, 6, 16, [4, 12], [9], 1, 5, 2, False]] # 7-P5/32
+#  - [-1, 1, CloBlock, [256, 7, 16, [4, 12], [9], 1, 5, 2, 1]]
+#  - [-1, 1, SPPF, [1024, 5]]  # 9
+
+  - [-1, 1, Conv, [64, 3, 2]]  # 0-P1/2
+  - [-1, 1, Conv, [128, 3, 2]]  # 1-P2/4
+  - [-1, 3, C2f, [128, True]]
+  - [-1, 1, Conv, [256, 3, 2]]  # 3-P3/8
+  - [-1, 6, C2f, [256, True]]
+  - [-1, 1, Conv, [512, 3, 2]]  # 5-P4/16
+  - [-1, 5, CloLayer, [128, 4, 8, [4, 4], [7], 2, 5, 4, False, False]]
+#  - [-1, 1, CloBlock, [256, 5, 8, [4, 4], [7], 2, 5, 4, 2]] # 7-P4/32
+  - [-1, 1, Conv, [1024, 3, 2]]  # 7-P5/32
+  - [-1, 1, CloLayer, [256, 6, 16, [4, 12], [9], 1, 5, 2, False, False]]
   - [-1, 1, SPPF, [1024, 5]]  # 9
-  - [-1, 1, CPCA, [4]]
 
 # YOLOv8.0n head
 head:
   - [-1, 1, nn.Upsample, [None, 2, 'nearest']]
-  - [[-1, 5], 1, Concat, [1]]  # cat backbone P4
+  - [[-1, 6], 1, Concat, [1]]  # cat backbone P4
   # 这里的3表示c2f中重复的Bottleneck个数
-  - [-1, 3, C2f, [512]]  # 13
+  - [-1, 3, C2fFaster, [512, 2]]  # 12
 
   - [-1, 1, nn.Upsample, [None, 2, 'nearest']]
-  - [[-1, 3], 1, Concat, [1]]  # cat backbone P3
-  - [-1, 3, C2f, [256]]  # 16 (P3/8-small)
-  - [-1, 1, CPCA, [4]]
+  - [[-1, 4], 1, Concat, [1]]  # cat backbone P3
+  - [-1, 3, C2fFaster, [256, 2]]  # 15 (P3/8-small)
+  - [-1, 1, EMA, [8]]
 
   - [-1, 1, Conv, [256, 3, 2]]
-  - [[-1, 13], 1, Concat, [1]]  # cat head P4
-  - [-1, 3, C2f, [512]]  # 20 (P4/16-medium)
-  - [-1, 1, CPCA, [4]]
+  - [[-1, 12], 1, Concat, [1]]  # cat head P4
+  - [-1, 3, C2fFaster, [512, 2]]  # 19 (P4/16-medium)
+  - [-1, 1, EMA, [8]]
 
   - [-1, 1, Conv, [512, 3, 2]]
-  - [[-1, 10], 1, Concat, [1]]  # cat head P5
-  - [-1, 3, C2f, [1024]]  # 24 (P5/32-large)
-  - [-1, 1, CPCA, [4]]
+  - [[-1, 9], 1, Concat, [1]]  # cat head P5
+  - [-1, 3, C2fFaster, [1024, 2]]  # 23 (P5/32-large)
 
   # 解耦头
-  - [[17, 21, 25], 1, Detect, [nc]]  # Detect(P3, P4, P5)
+  - [[15, 19, 23], 1, Detect, [nc]]  # Detect(P3, P4, P5)

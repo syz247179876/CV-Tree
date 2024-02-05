@@ -310,7 +310,7 @@ class Model(nn.Module):
         args = {**self.overrides, **custom, **kwargs, 'mode': 'export'}  # highest priority args on the right
         return Exporter(overrides=args, _callbacks=self.callbacks)(model=self.model)
 
-    def train(self, trainer=None, **kwargs):
+    def train(self, trainer: object = None, **kwargs: object) -> object:
         """
         Trains the model on a given dataset.
 
